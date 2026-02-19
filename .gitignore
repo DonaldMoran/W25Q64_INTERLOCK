@@ -1,0 +1,68 @@
+# ============================
+# General OS junk
+# ============================
+.DS_Store
+Thumbs.db
+
+# ============================
+# Editor / IDE files
+# ============================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ============================
+# Build outputs (generic)
+# ============================
+build/
+out/
+bin/
+obj/
+*.o
+*.a
+*.elf
+*.map
+*.lst
+
+# ============================
+# Pico SDK / CMake generated
+# ============================
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+pico_sdk_import.cmake
+
+# ============================
+# Pico firmware outputs
+# ============================
+*.uf2
+*.hex
+*.bin
+
+# ============================
+# Logs and temp files
+# ============================
+*.log
+*.tmp
+
+# ============================
+# Python cache (if any tools/scripts)
+# ============================
+__pycache__/
+*.pyc
+
+# ============================
+# Local config secrets (WiFi)
+# ============================
+wifi_secrets.h
+secrets.h
+
+# ============================
+# Assembly tool outputs (ca65/ld65)
+# ============================
+*.sym
+*.dbg

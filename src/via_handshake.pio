@@ -1,0 +1,42 @@
+; =================================================================================
+; UNIFIED VIA HANDSHAKE PIO PROGRAM
+; Works on both Real Hardware (High Precision) and Emulator
+; =================================================================================
+
+.program via_handshake_rx
+    ; RX: 6502 -> Pico
+    ; 1. Wait for CA2 (Input) to go High (Start of Frame)
+    ; 2. Read Data
+    ; 3. Pulse CA1 (Output) Low (Ack)
+    
+    wait 1 pin 8        ; Wait for CA2 (GPIO 14) to go High. (Input base is GPIO 6, so index 8 is 14)
+    nop [1]             ; Stability Delay: 0.2us (at 10MHz)
+    in pins, 8          ; Read 8 bits from Data Bus
+    set pins, 0         ; Drive CA1 Low (Ack)
+    wait 0 pin 8        ; Wait for CA2 to go Low (Handshake Complete)
+    set pins, 1         ; Drive CA1 High - ACK End
+    push block          ; Signal completion to C (Handshake done)
+
+
+.program via_handshake_tx
+    ; TX: Pico -> 6502
+    ; 1. Wait for CA2 High (Receiver Ready)
+    ; 2. Drive Data
+    ; 3. Pulse CA1 Low (Strobe)
+    
+    pull block          ; Get data from FIFO
+    wait 1 pin 8        ; Wait for CA2 High
+    nop [1]             ; Stability delay (0.2us)
+    out pins, 8         ; Drive Data Bus
+    
+    ; -----------------------------------------------------------------------------
+    ; SETUP TIME FIX: Increased from 0.2us to 1.0us
+    ; This ensures data is stable on physical wires before the VIA latches it.
+    ; -----------------------------------------------------------------------------
+    nop [9]             ; Setup time: 10 cycles = 1.0us
+    
+    ; Fully Interlocked Strobe
+    set pins, 0         ; Drive CA1 Low (Start Strobe)
+    wait 0 pin 8        ; Wait for CA2 Low (Ack from 6502)
+    set pins, 1         ; Drive CA1 High (End Strobe)
+    push block          ; Signal completion to C

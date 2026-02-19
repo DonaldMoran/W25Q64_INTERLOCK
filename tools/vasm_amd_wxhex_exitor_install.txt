@@ -1,0 +1,30 @@
+Download vasm V1.8j from http://sun.hasenbraten.de/vasm/index.php?view=tagged
+make CPU=6502 SYNTAX=oldstyle
+sudo cp vasm6502_oldstyle /usr/local/bin/
+
+sudo apt-get install srecord
+sudo apt-get install 64tass
+
+
+For wxhexeditor, specifically for On Wayland, on 0.24, GDK_BACKEND=x11 is necessary for the hex panel to refresh on scroll, refer to:
+https://github.com/EUA/wxHexEditor/issues/143
+and
+https://blog.flozz.fr/2019/11/01/wxhexeditor-probleme-de-rafraichissement-sous-ubuntu-1910-eoan-ermin/
+and
+https://unix.stackexchange.com/questions/326331/where-to-set-gdk-backend#494993
+
+
+/usr/share/applications/wxHexEditor.desktop
+[Desktop Entry]
+Version=1.0
+Encoding=UTF-8
+Name=wxHexEditor
+GenericName=wxHexEditor
+Comment=A hex editor for huge files and devices
+#Exec=wxHexEditor
+Exec=env GDK_BACKEND=x11 wxHexEditor
+Icon=wxHexEditor
+Terminal=false
+Type=Application
+Categories=Utility;TextEditor;Utility;
+Keywords[en_GB]=disk;drive;volume;harddisk;hdd;disc;cdrom;dvd;partition;iso;image;backup;restore;editor;
