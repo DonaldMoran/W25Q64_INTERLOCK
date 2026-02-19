@@ -93,14 +93,24 @@ uint8_t bus_read_byte(void) {
     pio_sm_set_pins_with_mask(PIO_INST, RX_SM, 1u << CA1_PIN, 1u << CA1_PIN); // Pre-set High
     pio_sm_set_consecutive_pindirs(PIO_INST, RX_SM, CA1_PIN, 1, true);
 
-    pio_sm_clear_fifos(PIO_INST, RX_SM);
-    pio_sm_restart(PIO_INST, RX_SM);
+    // REMOVED: pio_sm_clear_fifos(PIO_INST, RX_SM);
+    // REMOVED: pio_sm_restart(PIO_INST, RX_SM);
     pio_sm_set_enabled(PIO_INST, RX_SM, true);
 
     uint32_t raw = pio_sm_get_blocking(PIO_INST, RX_SM);
     pio_sm_get_blocking(PIO_INST, RX_SM); // Wait for Handshake Completion Token
 
     pio_sm_set_enabled(PIO_INST, RX_SM, false);
+
+    // FIX: Handover to TX_SM to actively drive CA1 High (Idle).
+    // This prevents CA1 from floating (and causing phantom reads on 6502)
+    // while the Pico is busy processing (e.g., writing to Flash).
+    pio_sm_set_consecutive_pindirs(PIO_INST, RX_SM, CA1_PIN, 1, false);
+    pio_sm_set_pins_with_mask(PIO_INST, TX_SM, 1u << CA1_PIN, 1u << CA1_PIN); // Force High
+    pio_sm_set_consecutive_pindirs(PIO_INST, TX_SM, CA1_PIN, 1, true);        // Drive Output
+    // REMOVED: pio_sm_restart(PIO_INST, TX_SM);                              // Reset to Idle
+    pio_sm_set_enabled(PIO_INST, TX_SM, true);                                // Enable Drive
+
     return (uint8_t)raw;
 }
 
@@ -114,7 +124,8 @@ void bus_write_byte(uint8_t b) {
 
     pio_sm_set_consecutive_pindirs(PIO_INST, TX_SM, DATA_BASE, 8, true);
 
-    pio_sm_clear_fifos(PIO_INST, TX_SM);
+    // Ensure SM is enabled (it should be waiting at 'pull' from previous wrap)
+    // No need to restart, which can cause glitches.
     pio_sm_set_enabled(PIO_INST, TX_SM, true);
 
     pio_sm_put_blocking(PIO_INST, TX_SM, b);
