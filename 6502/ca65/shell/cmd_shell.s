@@ -3,7 +3,7 @@
 
 .include "common/pico_def.inc"
 
-.import pico_init, pico_send_request
+.import pico_init, pico_send_request, send_byte, read_byte
 .import CMD_ID, ARG_LEN, ARG_BUFF, LAST_STATUS, RESP_LEN, RESP_BUFF
 
 ; ---------------------------------------------------------------------------
@@ -20,14 +20,23 @@ GETLINE      = $FF0E    ; Monitor entry point (CR + Prompt)
 OUTCH        = $FFEF    ; Print char in A (Preserves A)
 
 ; --- Zero Page pointers for strcmp ---
-str_ptr1 = $FB ; 2 bytes
-str_ptr2 = $FD ; 2 bytes
+str_ptr1 = $52 ; 2 bytes
+str_ptr2 = $54 ; 2 bytes
 ; --- Zero Page pointers for argument parsing ---
-arg_ptr = $F9 ; 2 bytes
+arg_ptr = $50 ; 2 bytes
+; --- Temp pointer for general use ---
+ptr_temp = $56 ; 2 bytes
 
 .segment "BSS"
 current_path: .res 128 ; Buffer for the current working directory
 is_mounted_flag: .res 1 ; 0 = not mounted, 1 = mounted
+
+; --- BSS variables for SAVEMEM ---
+savemem_start:    .res 2   ; Start address
+savemem_end:      .res 2   ; End address
+savemem_len:      .res 2   ; Computed length
+savemem_cnt:      .res 2   ; Remaining bytes counter
+filename_buf:     .res 32  ; Buffer for filename (null-terminated)
 
 .segment "CMD_SHELL"
 
@@ -188,10 +197,10 @@ dispatch_command:
     ; X is already pointing to the low byte of the handler address.
     ; We will JSR to the handler (via trampoline) and then RTS from here.
     lda command_table, x
-    sta $FB ; Temp store for JMP indirect (use our ZP area)
+    sta str_ptr1 ; Temp store for JMP indirect (use our ZP area)
     inx
     lda command_table, x
-    sta $FC
+    sta str_ptr1+1
     jsr call_handler_indirect
     rts ; Return to shell_loop
 
@@ -209,9 +218,9 @@ unknown_command:
 
 ; --- JSR-indirect trampoline ---
 call_handler_indirect:
-    ; Jumps to the routine pointed to by $FB/$FC.
+    ; Jumps to the routine pointed to by str_ptr1.
     ; The RTS from the called handler will return to our caller.
-    jmp ($FB)
+    jmp (str_ptr1)
 
 ; ---------------------------------------------------------------------------
 ; Command Handlers
@@ -230,13 +239,17 @@ do_dir:
     lda (arg_ptr),y     ; Check if the first character of the argument is null
     bne @arg_exists
 
-    ; No argument: send "/" as the path.
-    lda #'/'
-    sta ARG_BUFF
-    lda #0
-    sta ARG_BUFF+1
-    lda #2              ; Length is 2 (char + null terminator)
-    sta ARG_LEN
+    ; No argument: use current_path
+    ldx #0
+@copy_cwd:
+    lda current_path, x
+    sta ARG_BUFF, x
+    beq @cwd_done
+    inx
+    jmp @copy_cwd
+@cwd_done:
+    inx                 ; Include null terminator in length
+    stx ARG_LEN
     jmp @send_request
 
 @arg_exists:
@@ -291,22 +304,139 @@ do_cd:
     rts
 @proceed:
 
-    ; For CD, we just manipulate the local current_path buffer.
-    ; No Pico communication is needed.
-    ; This is a placeholder for the full path resolution logic.
-    ; For now, it only supports absolute paths.
     jsr get_first_arg
+    
+    ; 1. Check for empty argument (cd -> root)
     ldy #0
-@copy_loop:
+    lda (arg_ptr), y
+    beq @go_root
+
+    ; 2. Check for ".."
+    cmp #'.'
+    bne @check_abs
+    iny
+    lda (arg_ptr), y
+    cmp #'.'
+    bne @check_abs
+    iny
+    lda (arg_ptr), y
+    beq @go_up          ; Match ".." exactly
+
+@check_abs:
+    ; 3. Check for absolute path (starts with /)
+    ldy #0
+    lda (arg_ptr), y
+    cmp #'/'
+    beq @absolute_path
+
+    ; 4. Relative path: Append to current_path
+    ; Find end of current_path
+    ldx #0
+@find_end:
+    lda current_path, x
+    beq @found_end
+    inx
+    cpx #126            ; Safety check
+    bcc @find_cont
+    jmp @path_too_long
+@find_cont:
+    jmp @find_end
+@found_end:
+    
+    ; Check if we need a separator
+    cpx #0
+    beq @need_sep       ; Empty? Treat as root context
+    cpx #1
+    bne @check_sep
+    lda current_path
+    cmp #'/'
+    beq @no_sep_needed  ; Root "/" doesn't need extra separator
+@check_sep:
+    dex                 ; Check char before null
+    lda current_path, x
+    inx                 ; Restore X to null position
+    cmp #'/'
+    beq @no_sep_needed
+@need_sep:
+    lda #'/'
+    sta current_path, x
+    inx
+@no_sep_needed:
+    ; Append arg
+    ldy #0
+@append_loop:
+    lda (arg_ptr), y
+    beq @append_done
+    sta current_path, x
+    inx
+    iny
+    cpx #127            ; Check buffer limit
+    bcs @path_too_long
+    jmp @append_loop
+@append_done:
+    lda #0
+    sta current_path, x
+    rts
+
+@absolute_path:
+    ; Copy arg directly to current_path
+    ldy #0
+@copy_abs:
     lda (arg_ptr), y
     sta current_path, y
     beq @copy_done
     iny
-    cpy #127 ; Don't overflow buffer
-    bne @copy_loop
+    cpy #127
+    bne @copy_abs
     lda #0
     sta current_path, y
 @copy_done:
+    rts
+
+@go_root:
+    lda #'/'
+    sta current_path
+    lda #0
+    sta current_path+1
+    rts
+
+@go_up:
+    ; Handle ".." - Strip last component
+    ; Find end of string
+    ldx #0
+@up_find_end:
+    lda current_path, x
+    beq @up_found_end
+    inx
+    jmp @up_find_end
+@up_found_end:
+    ; X points to null. Scan back.
+    dex
+    bmi @go_root        ; Empty string -> root
+@up_scan_back:
+    cpx #0
+    beq @go_root        ; Reached start -> root
+    lda current_path, x
+    cmp #'/'
+    beq @up_cut
+    dex
+    jmp @up_scan_back
+@up_cut:
+    ; Found the separator.
+    ; If it's the first char (index 0), we are at root parent (e.g. /Donald -> /)
+    cpx #0
+    beq @up_root_parent
+    ; Otherwise (e.g. /A/B -> /A), terminate here
+    lda #0
+    sta current_path, x
+    rts
+@up_root_parent:
+    ; We found the leading slash. Keep it.
+    lda #0
+    sta current_path+1
+    rts
+
+@path_too_long:
     rts
 
 do_mkdir:
@@ -477,6 +607,7 @@ connect_msg_loop:
     beq @connect_done
     jsr OUTCH
     inx
+    jmp connect_msg_loop
 @connect_done:
     rts
 
@@ -494,6 +625,367 @@ do_help:
 
 do_exit:
     jmp WOZMON
+
+; ---------------------------------------------------------------------------
+; do_savemem - Save memory range to file
+; Format: SAVEMEM <start_hex> <end_hex> <filename>
+; ---------------------------------------------------------------------------
+do_savemem:
+    ; First, ensure filesystem is mounted
+    jsr guard_requires_mount
+    bcc @proceed
+    rts
+
+@proceed:
+    ; Parse start address (first argument)
+    jsr get_first_arg
+    jsr parse_hex_word
+    bcc @ok1
+    jmp cmd_parse_error
+@ok1:
+    sta savemem_start
+    stx savemem_start+1
+
+    ; Parse end address (second argument)
+    jsr get_next_arg
+    bcc @ok2
+    jmp cmd_arg_error
+@ok2:
+    jsr parse_hex_word
+    bcc @ok3
+    jmp cmd_parse_error
+@ok3:
+    sta savemem_end
+    stx savemem_end+1
+
+    ; Get filename (third argument)
+    jsr get_next_arg
+    bcc @ok4
+    jmp cmd_arg_error
+@ok4:
+    ; Copy filename to filename_buf
+    ldy #0
+    ; Store the pointer to the argument temporarily
+    lda arg_ptr
+    sta ptr_temp          ; Store low byte
+    lda arg_ptr+1
+    sta ptr_temp+1        ; Store high byte
+@copy_filename:
+    lda (ptr_temp), y
+    sta filename_buf, y
+    beq @filename_done
+    iny
+    cpy #31
+    bne @copy_filename
+    lda #0
+    sta filename_buf, y
+@filename_done:
+
+    ; Compute length = end - start + 1
+    sec
+    lda savemem_end
+    sbc savemem_start
+    sta savemem_len
+    lda savemem_end+1
+    sbc savemem_start+1
+    sta savemem_len+1
+
+    ; Add 1
+    clc
+    lda savemem_len
+    adc #1
+    sta savemem_len
+    lda savemem_len+1
+    adc #0
+    sta savemem_len+1
+
+    ; Validate length (non-zero)
+    lda savemem_len
+    ora savemem_len+1
+    bne @len_ok
+    jmp cmd_invalid_range
+
+@len_ok:
+    ; Pack arguments for Pico: filename (null-term) + length (2 bytes)
+    ldx #0
+@pack_filename:
+    lda filename_buf, x
+    sta ARG_BUFF, x
+    beq @pack_length
+    inx
+    cpx #32
+    bne @pack_filename
+
+@pack_length:
+    ; Store length after filename's null
+    lda savemem_len
+    sta ARG_BUFF+1, x
+    lda savemem_len+1
+    sta ARG_BUFF+2, x
+
+    ; ARG_LEN = filename length (including null) + 2
+    txa
+    clc
+    adc #3
+    sta ARG_LEN
+
+    ; Send command to Pico
+    lda #CMD_FS_SAVEMEM
+    sta CMD_ID
+    jsr pico_send_request
+    bcc @cmd_sent
+    jsr timeout_error
+    rts
+
+@cmd_sent:
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    beq @start_stream
+    jsr print_command_failed
+    rts
+
+@start_stream:
+    ; Initialize streaming pointers
+    lda savemem_start
+    sta ptr_temp
+    lda savemem_start+1
+    sta ptr_temp+1
+
+    lda savemem_len
+    sta savemem_cnt
+    lda savemem_len+1
+    sta savemem_cnt+1
+
+    ; Print "Saving..." message
+    ldx #0
+@save_msg:
+    lda SAVING_MSG, x
+    beq @stream_loop
+    jsr OUTCH
+    inx
+    jmp @save_msg
+
+@stream_loop:
+    ; Check if done
+    lda savemem_cnt
+    ora savemem_cnt+1
+    beq @stream_done
+
+    ; Send next byte
+    ldy #0
+    lda (ptr_temp), y
+    jsr send_byte
+
+    ; Increment pointer
+    inc ptr_temp
+    bne @no_carry
+    inc ptr_temp+1
+@no_carry:
+
+    ; Decrement counter
+    lda savemem_cnt
+    bne @dec_low
+    dec savemem_cnt+1
+@dec_low:
+    dec savemem_cnt
+
+    ; Optional progress dot every 256 bytes
+    lda savemem_cnt
+    and #$FF
+    cmp #$FF
+    bne @no_dot
+    lda #'.'
+    jsr OUTCH
+@no_dot:
+    jmp @stream_loop
+
+@stream_done:
+    ; Read final 3-byte status header from Pico
+    ; Switch Port A to Input to read response
+    lda #$00
+    sta VIA_DDRA
+
+    jsr read_byte
+    sta LAST_STATUS
+    jsr read_byte       ; Read len_lo, ignored
+    jsr read_byte       ; Read len_hi, ignored
+
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    bne @stream_error
+
+    ; Restore Port A to Output
+    lda #$FF
+    sta VIA_DDRA
+
+    ; Print success message
+    jsr CRLF
+    ldx #0
+@success_msg:
+    lda SAVED_MSG, x
+    beq @done
+    jsr OUTCH
+    inx
+    jmp @success_msg
+
+@done:
+    jsr CRLF
+    rts
+
+@stream_error:
+    ; Restore Port A to Output
+    lda #$FF
+    sta VIA_DDRA
+
+    jsr print_command_failed
+    rts
+
+; ---------------------------------------------------------------------------
+; do_loadmem - Load file into memory
+; Format: LOADMEM <address> <filename>
+; ---------------------------------------------------------------------------
+do_loadmem:
+    jsr guard_requires_mount
+    bcc @proceed
+    rts
+@proceed:
+    ; Parse destination address
+    jsr get_first_arg
+    jsr parse_hex_word
+    bcc @addr_ok
+    jmp cmd_parse_error
+@addr_ok:
+    sta ptr_temp
+    stx ptr_temp+1
+
+    ; Parse filename
+    jsr get_next_arg
+    bcc @file_ok
+    jmp cmd_arg_error
+@file_ok:
+    ; Copy filename to ARG_BUFF
+    ldy #0
+@copy_loop:
+    lda (arg_ptr), y
+    sta ARG_BUFF, y
+    beq @copy_done
+    iny
+    jmp @copy_loop
+@copy_done:
+    sty ARG_LEN
+    inc ARG_LEN     ; Include null terminator
+
+    ; --- Manually Send Command (Bypass pico_send_request buffer limit) ---
+    lda #$FF
+    sta VIA_DDRA    ; Set Port A to Output
+
+    lda #CMD_FS_LOADMEM
+    jsr send_byte
+
+    lda ARG_LEN
+    jsr send_byte
+
+    ldx #0
+@send_args:
+    lda ARG_BUFF, x
+    jsr send_byte
+    inx
+    cpx ARG_LEN
+    bne @send_args
+
+    ; --- Receive Response ---
+    lda #$00
+    sta VIA_DDRA    ; Set Port A to Input
+
+    jsr read_byte   ; Read Status
+    cmp #STATUS_OK
+    beq @status_ok
+    
+    ; Handle Error
+    lda #$FF
+    sta VIA_DDRA
+    jsr print_command_failed
+    rts
+
+@status_ok:
+    jsr read_byte   ; Read Length Low
+    sta savemem_cnt
+    jsr read_byte   ; Read Length High
+    sta savemem_cnt+1
+
+@load_loop:
+    lda savemem_cnt
+    ora savemem_cnt+1
+    beq @done
+
+    jsr read_byte
+    ldy #0
+    sta (ptr_temp), y
+
+    inc ptr_temp
+    bne @no_inc
+    inc ptr_temp+1
+@no_inc:
+    
+    ; Decrement 16-bit counter
+    lda savemem_cnt
+    bne @dec_lo
+    dec savemem_cnt+1
+@dec_lo:
+    dec savemem_cnt
+    jmp @load_loop
+
+@done:
+    lda #$FF
+    sta VIA_DDRA    ; Restore Port A to Output
+    
+    jsr CRLF
+    ldx #0
+@msg:
+    lda SAVED_MSG, x ; Reuse "Done" message
+    beq @msg_done
+    jsr OUTCH
+    inx
+    jmp @msg
+@msg_done:
+    jsr CRLF
+    rts
+
+cmd_parse_error:
+    ldx #0
+@parse_err_msg:
+    lda PARSE_ERROR_MSG, x
+    beq @parse_err_done
+    jsr OUTCH
+    inx
+    jmp @parse_err_msg
+@parse_err_done:
+    jsr CRLF
+    rts
+
+cmd_arg_error:
+    ldx #0
+@arg_err_msg:
+    lda ARG_ERROR_MSG, x
+    beq @arg_err_done
+    jsr OUTCH
+    inx
+    jmp @arg_err_msg
+@arg_err_done:
+    jsr CRLF
+    rts
+
+cmd_invalid_range:
+    ldx #0
+@range_err_msg:
+    lda RANGE_ERROR_MSG, x
+    beq @range_err_done
+    jsr OUTCH
+    inx
+    jmp @range_err_msg
+@range_err_done:
+    jsr CRLF
+    rts
 
 timeout_error:
     jsr CRLF
@@ -533,38 +1025,38 @@ guard_requires_mount:
 print_response:
     ; Setup pointer to RESP_BUFF
     lda #<RESP_BUFF
-    sta $FB
+    sta str_ptr1
     lda #>RESP_BUFF
-    sta $FC
+    sta str_ptr1+1
 
     ; Use RESP_LEN as counter
     lda RESP_LEN
-    sta $FD
+    sta str_ptr2
     lda RESP_LEN+1
-    sta $FE
+    sta str_ptr2+1
 
     ldy #0
 @pr_loop:
-    lda $FD
-    ora $FE
+    lda str_ptr2
+    ora str_ptr2+1
     beq @pr_done    ; If length is 0, we are done
 
-    lda ($FB), y
+    lda (str_ptr1), y
     jsr OUTCH
 
     ; Increment Pointer
-    inc $FB
+    inc str_ptr1
     bne @no_inc
-    inc $FC
+    inc str_ptr1+1
 @no_inc:
 
     ; Decrement Length
-    lda $FD
+    lda str_ptr2
     sec
     sbc #1
-    sta $FD
+    sta str_ptr2
     bcs @pr_loop
-    dec $FE
+    dec str_ptr2+1
     jmp @pr_loop
 
 @pr_done:
@@ -735,6 +1227,121 @@ get_first_arg_as_pico_arg:
     inc ARG_LEN      ; Add 1 for the null terminator
     rts
 
+; ---------------------------------------------------------------------------
+; get_next_arg - Advances arg_ptr to the next argument in the input buffer.
+; In:  arg_ptr points to the beginning of the current argument.
+; Out: arg_ptr points to the beginning of the next argument.
+;      Carry is set if no more arguments are found.
+;      Carry is clear if an argument was found.
+; Clobbers: A, Y
+; ---------------------------------------------------------------------------
+get_next_arg:
+    ldy #0
+    ; 1. Find end of current argument (space or null)
+@find_end:
+    lda (arg_ptr), y
+    beq @no_more_args
+    cmp #' '
+    beq @found_end
+    iny
+    jmp @find_end
+
+@found_end:
+    ; 2. Skip any subsequent spaces
+@skip_spaces:
+    iny
+    lda (arg_ptr), y
+    beq @no_more_args
+    cmp #' '
+    bne @found_next_arg
+    jmp @skip_spaces
+
+@found_next_arg:
+    ; 3. Found start of next arg. Update arg_ptr.
+    tya
+    clc
+    adc arg_ptr
+    sta arg_ptr
+    bcc @done
+    inc arg_ptr+1
+@done:
+    clc ; Success
+    rts
+
+@no_more_args:
+    sec ; No more arguments
+    rts
+
+; ---------------------------------------------------------------------------
+; parse_hex_word - Parse hex word from (arg_ptr)
+; Returns: A/X = 16-bit value (A=lo, X=hi), Carry set on error
+; Clobbers: Y, $F0, $F1
+; ---------------------------------------------------------------------------
+parse_hex_word:
+    ldy #0
+    lda #0
+    sta ptr_temp+1        ; Temp high byte
+    sta ptr_temp          ; Temp low byte
+
+@parse_loop:
+    lda (arg_ptr), y
+    beq @done
+    cmp #' '
+    beq @done
+
+    jsr hex_nibble
+    bcs @error
+
+    ; Shift current value left 4 bits
+    asl ptr_temp
+    rol ptr_temp+1
+    asl ptr_temp
+    rol ptr_temp+1
+    asl ptr_temp
+    rol ptr_temp+1
+    asl ptr_temp
+    rol ptr_temp+1
+
+    ; Add new nibble
+    ora ptr_temp
+    sta ptr_temp
+
+    iny
+    jmp @parse_loop
+
+@done:
+    lda ptr_temp
+    ldx ptr_temp+1
+    clc
+    rts
+
+@error:
+    sec
+    rts
+
+hex_nibble: ; in: A, out: A=nibble, C=0 on success, C=1 on error
+    cmp #'0'
+    bcc @not_hex
+    cmp #'9'+1
+    bcc @is_digit
+    and #%11011111 ; to upper case
+    cmp #'A'
+    bcc @not_hex
+    cmp #'F'+1
+    bcs @not_hex
+    sec
+    sbc #('A' - 10)
+    clc
+    rts
+@is_digit:
+    sec
+    sbc #'0'
+    clc
+    rts
+@not_hex:
+    sec
+    rts
+
 ; ===========================================================================
 ; DATA
 ; ===========================================================================
@@ -754,6 +1361,8 @@ command_table:
     .word cmd_str_help,  do_help
     .word cmd_str_connect, do_connect
     .word cmd_str_exit,  do_exit
+    .word cmd_savemem_str, do_savemem
+    .word cmd_loadmem_str, do_loadmem
     .word 0 ; End of table
 
 ; --- Command Strings ---
@@ -768,12 +1377,14 @@ cmd_str_ping:  .asciiz "PING"
 cmd_str_help:  .asciiz "HELP"
 cmd_str_connect: .asciiz "CONNECT"
 cmd_str_exit:  .asciiz "EXIT"
+cmd_savemem_str: .asciiz "SAVEMEM"
+cmd_loadmem_str: .asciiz "LOADMEM"
 empty_str:     .asciiz ""
 
 START_MSG:       .asciiz "6502 Shell Ready"
 ERR_MSG:         .asciiz "TIMEOUT"
 UNK_MSG:         .asciiz "Unknown Command"
-HELP_MSG:        .asciiz "CMDS: CD, CONNECT, DEL, DIR, EXIT, FORMAT, HELP, MKDIR, MOUNT, PING, PWD"
+HELP_MSG:        .asciiz "CMDS: CD, CONNECT, DEL, DIR, EXIT, FORMAT, HELP, LOADMEM, MKDIR, MOUNT, PING, PWD, SAVEMEM"
 NOT_MOUNTED_MSG: .asciiz "MEDIA NOT MOUNTED"
 MOUNT_OK_MSG:    .asciiz "MEDIA MOUNTED"
 CONNECT_OK_MSG: .asciiz "CONNECTING"
@@ -782,3 +1393,10 @@ FORMAT_OK_MSG:   .asciiz "FORMAT COMPLETE"
 FORMAT_FAIL_MSG: .asciiz "FORMAT FAILED"
 COMMAND_FAILED_MSG: .asciiz "COMMAND FAILED"
 FILE_NOT_FOUND_MSG: .asciiz "FILE NOT FOUND"
+
+; --- SAVEMEM Messages ---
+SAVING_MSG:         .asciiz "Saving..."
+SAVED_MSG:          .asciiz "Done"
+PARSE_ERROR_MSG:    .asciiz "Parse error"
+ARG_ERROR_MSG:      .asciiz "Argument error"
+RANGE_ERROR_MSG:    .asciiz "Invalid range"

@@ -18,21 +18,19 @@ The 65C02 computer issues commands, which are transmitted through the 6522 VIA t
 
 
 ## Implemented Commands
-*   **DIR**: Lists files in a directory.
+*   **DIR [PATH]**: Lists files in a directory. If no path is specified, lists the root directory.
 *   **MOUNT**: Mounts the file system.
 *   **PWD**: Shows the current directory.
-*   **CD**: Change the current directory
-*   **MKDIR**: Make a new directory.
-*   **DEL**: Delete a file.
+*   **CD [PATH]**: Change the current directory.
+*   **MKDIR [PATH]**: Make a new directory.
+*   **DEL [PATH]**: Delete a file.
 *   **FORMAT**: Format the W25Q64 Flash Memory
 *   **PING**: Ping the Raspberry Pi Pico W
 *   **HELP**: Lists available commands.
 *   **CONNECT**: Connects to the configured WIFI Network
 *   **EXIT**: Exits the shell and returns to the WozMon
-
-
-## Target Commands
-*   **SAVEMEM [START ADDRESS IN HEX] [END ADDRESS IN HEX] FILENAME**: Save a region of 6502 memory to a file on the W25Q64 flash.
+*   **SAVEMEM [START_HEX] [END_HEX] [FILENAME]**: Save a region of 6502 memory to a file on the W25Q64 flash.
+*   **LOADMEM [ADDRESS_HEX] [FILENAME]**: Load a file from flash into 6502 memory.
 
 
 ## 2. Communication Protocol
@@ -44,6 +42,11 @@ The communication between the 65C02 and the Raspberry Pi Pico W occurs over a pa
 
 The 65C02 uses CA2 to signal frame start and the Pico uses CA1 to ACK.
 
+### Streaming Protocol (SAVEMEM/LOADMEM)
+For large data transfers, the system uses a streaming state machine on the Pico side (`STATE_SAVEMEM_STREAM`, `STATE_LOADMEM_STREAM`) to bypass the standard command buffer limits.
+*   **SAVEMEM**: 6502 sends header -> Pico enters stream mode -> 6502 streams bytes -> Pico writes to flash -> Pico sends status.
+*   **LOADMEM**: 6502 sends header -> Pico enters stream mode -> Pico reads from flash and streams bytes -> 6502 writes to RAM.
+
 ## 3. Error Handling
 
 The project employs a centralized error reporting strategy. Errors detected by the Raspberry Pi Pico W are propagated back to the 65C02 computer, which then presents them on a screen. This allows for a simple and consolidated view of system status and errors.
@@ -51,10 +54,13 @@ The project employs a centralized error reporting strategy. Errors detected by t
 ## 4. Concurrency and Timing
 
 The parallel bus communication is fully interlocked, removing the need for software delays or complex timing management. Each byte transfer is synchronized using hardware handshaking signals.
+*   **Critical**: The PIO state machines on the Pico must NOT be restarted during active transactions to prevent bus glitches.
+*   **Critical**: The 6502 must switch VIA Port A direction correctly before reading responses to avoid bus contention.
 
 ## 5. Memory Management
 
 *   `http_buf`: A static buffer of size `HTTP_BUF_SIZE` (32768 bytes) used for HTTP downloads.
+*   `savemem_buf`: A 256-byte buffer used for chunking flash writes/reads during streaming operations.
 *   LittleFS manages memory allocation and deallocation within the W25Q64 flash memory, but further investigation is required to determine the specifics.
 
 ## 6. Configuration
