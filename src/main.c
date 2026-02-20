@@ -1185,6 +1185,10 @@ int main() {
             {
                 // Args: [Filename]
                 char *filename = (char *)arg_buf;
+
+                // Truncate at first space (for RUN command with args)
+                char *p = strchr(filename, ' ');
+                if (p) *p = 0;
                 
                 if (!fs_mounted) {
                     printf("LOADMEM: FS not mounted\n");
