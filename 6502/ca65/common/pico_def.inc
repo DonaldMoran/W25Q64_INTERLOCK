@@ -1,5 +1,8 @@
 ; pico_def.inc - Definitions for 6502 Smart Peripheral
 
+.ifndef PICO_DEF_INC
+PICO_DEF_INC = 1
+
 ; ---------------------------------------------------------------------------
 ; 6522 VIA Hardware Definitions (Base $6000)
 ; ---------------------------------------------------------------------------
@@ -58,3 +61,5 @@ STATUS_OK       = $00
 STATUS_ERR      = $FF
 STATUS_BUSY     = $01
 STATUS_NO_FILE  = $02
+
+.endif ; PICO_DEF_INC

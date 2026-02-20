@@ -46,6 +46,7 @@ hex_offset:       .res 2
 
 .segment "CMD_SHELL"
 
+
 start:
     ; Start on a fresh line
     jsr CRLF
@@ -181,7 +182,7 @@ dispatch_command:
     ; Check for end of table (null pointer)
     lda str_ptr2
     ora str_ptr2+1
-    beq unknown_command
+    beq try_external    ; If not found in table, try external command in /BIN
 
     ; Set up pointer to user input
     lda #<INPUT_BUFFER
@@ -209,6 +210,114 @@ dispatch_command:
     sta str_ptr1+1
     jsr call_handler_indirect
     rts ; Return to shell_loop
+
+; ---------------------------------------------------------------------------
+; try_external
+; Checks if /BIN/<COMMAND>.BIN exists. If so, rewrites INPUT_BUFFER
+; to "RUN /BIN/<COMMAND>.BIN <ARGS>" and jumps to do_run.
+; ---------------------------------------------------------------------------
+try_external:
+    ; 1. Construct "/BIN/<CMD>.BIN" in ARG_BUFF
+    
+    ; Copy "/BIN/" prefix
+    ldx #0
+@copy_prefix:
+    lda str_bin_prefix, x
+    beq @prefix_done
+    sta ARG_BUFF, x
+    inx
+    jmp @copy_prefix
+@prefix_done:
+    ; X is now 5
+
+    ; Copy Command from INPUT_BUFFER
+    ldy #0
+@copy_cmd:
+    lda INPUT_BUFFER, y
+    beq @cmd_done
+    cmp #' '
+    beq @cmd_done
+    sta ARG_BUFF, x
+    inx
+    iny
+    jmp @copy_cmd
+@cmd_done:
+    sty ptr_temp ; Save command length (Y) in ptr_temp
+
+    ; Copy ".BIN" suffix
+    ldy #0
+@copy_suffix:
+    lda str_bin_suffix, y
+    beq @suffix_done
+    sta ARG_BUFF, x
+    inx
+    iny
+    jmp @copy_suffix
+@suffix_done:
+    ; Null terminate ARG_BUFF
+    lda #0
+    sta ARG_BUFF, x
+    stx ARG_LEN
+
+    ; 2. Check if file exists (CMD_FS_STAT)
+    lda #CMD_FS_STAT
+    sta CMD_ID
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    bne unknown_command ; File not found, report unknown command
+
+    ; 3. File exists! Rewrite INPUT_BUFFER.
+    ; We need to shift the arguments (if any) to the right by 13 bytes.
+    ; Shift amount = len("/BIN/") + len(".BIN") + len("RUN ") = 5 + 4 + 4 = 13.
+    
+    ; Find end of INPUT_BUFFER
+    ldx ptr_temp ; Start at end of command word
+@find_end:
+    lda INPUT_BUFFER, x
+    beq @found_end
+    inx
+    jmp @find_end
+@found_end:
+    ; X points to null terminator. Copy backwards.
+@shift_loop:
+    lda INPUT_BUFFER, x
+    sta INPUT_BUFFER + 13, x
+    cpx ptr_temp
+    beq @shift_done
+    dex
+    jmp @shift_loop
+@shift_done:
+
+    ; 4. Write "RUN " at start
+    ldx #0
+@write_run:
+    lda str_run_prefix, x
+    beq @write_run_done
+    sta INPUT_BUFFER, x
+    inx
+    jmp @write_run
+@write_run_done:
+
+    ; 5. Copy path from ARG_BUFF to INPUT_BUFFER + 4
+    ; ARG_BUFF contains "/BIN/<CMD>.BIN"
+    ldy #0
+@write_path:
+    lda ARG_BUFF, y
+    beq @write_path_done
+    sta INPUT_BUFFER, x
+    inx
+    iny
+    jmp @write_path
+@write_path_done:
+    ; Add a space between the program and its arguments
+    lda #' '
+    sta INPUT_BUFFER, x
+    inx
+
+    ; 6. Execute
+    jmp do_run
 
 unknown_command:
     ldx #0
@@ -1033,6 +1142,7 @@ do_type:
     sty ARG_LEN
     inc ARG_LEN     ; Include null terminator
 
+@check_ext:
     ; Check for .BIN extension (Case insensitive)
     ; Y is length. We need at least 4 chars (.BIN)
     cpy #4
@@ -1252,49 +1362,31 @@ do_rename:
     bcc @proceed
     rts
 @proceed:
-    ; Parse old filename
+    ; Parse and resolve old filename
     jsr get_first_arg
-    
-    ; Copy old filename to ARG_BUFF
-    ldy #0
     ldx #0
-@copy_old:
-    lda (arg_ptr), y
-    beq @old_done_eol   ; End of string -> Error (missing 2nd arg)
-    cmp #' '
-    beq @old_done_space ; Space -> End of first arg
+    jsr resolve_path_to_arg_buff
+    bcc @old_ok
+    jmp cmd_arg_error
+@old_ok:
+    lda #0
     sta ARG_BUFF, x
     inx
-    iny
-    jmp @copy_old
-@old_done_eol:
-    jmp cmd_arg_error
-@old_done_space:
-    lda #0
-    sta ARG_BUFF, x     ; Null terminate first arg
-    inx                 ; Skip the null separator
-    
-    ; Parse new filename
-    stx ptr_temp ; Save X (offset in ARG_BUFF)
+    stx ptr_temp
+
+    ; Parse and resolve new filename
     jsr get_next_arg
-    bcc @new_ok
+    bcc @new_ok_arg
     jmp cmd_arg_error
-@new_ok:
-    ldx ptr_temp ; Restore X
-    ldy #0
-@copy_new:
-    lda (arg_ptr), y
-    beq @new_done       ; End of string -> Done
-    cmp #' '            ; Space -> End of second arg
-    beq @new_done
+@new_ok_arg:
+    ldx ptr_temp
+    jsr resolve_path_to_arg_buff
+    bcc @new_ok_resolve
+    jmp cmd_arg_error
+@new_ok_resolve:
+    lda #0
     sta ARG_BUFF, x
     inx
-    iny
-    jmp @copy_new
-@new_done:
-    lda #0
-    sta ARG_BUFF, x     ; Null terminate second arg
-    inx                 ; Include null terminator
     stx ARG_LEN
     
     lda #CMD_FS_RENAME
@@ -1308,7 +1400,134 @@ do_rename:
     cmp #STATUS_OK
     beq @rename_success
     jsr print_command_failed
+    rts
+
 @rename_success:
+    clc
+    rts
+
+; ---------------------------------------------------------------------------
+; resolve_path_to_arg_buff
+; Copies path from (arg_ptr) to ARG_BUFF starting at index X, resolving
+; it against the current_path if it's relative. Stops at a space or null.
+; In: X = starting offset in ARG_BUFF. arg_ptr points to path string.
+; Out: X = new offset in ARG_BUFF after copying. Carry set on error.
+; Clobbers: A, Y
+; ---------------------------------------------------------------------------
+resolve_path_to_arg_buff:
+    ldy #0
+    lda (arg_ptr), y
+    cmp #'/'
+    beq @abs_path
+
+    ; --- Relative Path ---
+    ; If current path is not root, copy it first.
+    ldy #0
+    lda current_path, y
+    cmp #'/'
+    bne @copy_current
+    iny
+    lda current_path, y
+    beq @copy_arg_only ; It's root "/", so just append argument.
+@copy_current:
+    ldy #0
+@copy_current_loop:
+    lda current_path, y
+    beq @append_separator
+    sta ARG_BUFF, x
+    iny
+    inx
+    cpx #127
+    bcc @copy_current_loop
+    jmp @path_toolong
+
+@append_separator:
+    ; Append a separator if needed
+    dex
+    lda ARG_BUFF, x
+    inx
+    cmp #'/'
+    beq @copy_arg_only
+    lda #'/'
+    sta ARG_BUFF, x
+    inx
+
+@copy_arg_only:
+    ; Now append the argument itself
+    ldy #0
+@copy_rel_arg:
+    lda (arg_ptr), y
+    beq @done
+    cmp #' '
+    beq @done
+    sta ARG_BUFF, x
+    iny
+    inx
+    cpx #127
+    bcc @copy_rel_arg
+    jmp @path_toolong
+
+@abs_path:
+    ; --- Absolute Path ---
+    ldy #0
+@copy_abs_arg:
+    lda (arg_ptr), y
+    beq @done
+    cmp #' '
+    beq @done
+    sta ARG_BUFF, x
+    iny
+    inx
+    cpx #127
+    bcc @copy_abs_arg
+    jmp @path_toolong
+
+@done:
+    clc
+    rts
+@path_toolong:
+    sec
+    rts
+
+; ---------------------------------------------------------------------------
+; get_next_arg - Advances arg_ptr to the next argument in the input buffer.
+; In:  arg_ptr points to the beginning of the current argument.
+; Out: arg_ptr points to the beginning of the next argument.
+;      Carry is set if no more arguments are found.
+;      Carry is clear if an argument was found.
+; Clobbers: A, Y
+; ---------------------------------------------------------------------------
+get_next_arg:
+    ldy #0
+@find_end:
+    lda (arg_ptr), y
+    beq @no_more_args
+    cmp #' '
+    beq @found_end
+    iny
+    jmp @find_end
+
+@found_end:
+@skip_spaces:
+    iny
+    lda (arg_ptr), y
+    beq @no_more_args
+    cmp #' '
+    beq @skip_spaces
+
+    ; Found start of next arg
+    tya
+    clc
+    adc arg_ptr
+    sta arg_ptr
+    lda arg_ptr+1
+    adc #0
+    sta arg_ptr+1
+    clc                     ; Success - clear carry
+    rts
+
+@no_more_args:
+    sec                     ; No more arguments - set carry
     rts
 
 ; ---------------------------------------------------------------------------
@@ -1434,16 +1653,15 @@ do_run:
 @done:
     lda #$FF
     sta VIA_DDRA    ; Restore Port A to Output
-    
-    jsr CRLF
-    
+
     ; Execute via trampoline
     lda savemem_start
     sta str_ptr1
     lda savemem_start+1
     sta str_ptr1+1
-    
+
     jsr call_handler_indirect
+    jsr CRLF        ; Add a newline after the program finishes
     rts
 
 ; ---------------------------------------------------------------------------
@@ -1676,47 +1894,6 @@ get_first_arg_as_pico_arg:
     rts
 
 ; ---------------------------------------------------------------------------
-; get_next_arg - Advances arg_ptr to the next argument in the input buffer.
-; In:  arg_ptr points to the beginning of the current argument.
-; Out: arg_ptr points to the beginning of the next argument.
-;      Carry is set if no more arguments are found.
-;      Carry is clear if an argument was found.
-; Clobbers: A, Y
-; ---------------------------------------------------------------------------
-get_next_arg:
-    ldy #0
-@find_end:
-    lda (arg_ptr), y
-    beq @no_more_args
-    cmp #' '
-    beq @found_end
-    iny
-    jmp @find_end
-
-@found_end:
-@skip_spaces:
-    iny
-    lda (arg_ptr), y
-    beq @no_more_args
-    cmp #' '
-    beq @skip_spaces
-
-    ; Found start of next arg
-    tya
-    clc
-    adc arg_ptr
-    sta arg_ptr
-    bcc @success
-    inc arg_ptr+1
-@success:
-    clc
-    rts
-
-@no_more_args:
-    sec ; No more arguments
-    rts
-
-; ---------------------------------------------------------------------------
 ; parse_hex_word - Parse hex word from (arg_ptr)
 ; Returns: A/X = 16-bit value (A=lo, X=hi), Carry set on error
 ; Clobbers: Y, ptr_temp
@@ -1790,6 +1967,8 @@ hex_nibble: ; in: A, out: A=nibble, C=0 on success, C=1 on error
 ; DATA
 ; ===========================================================================
 
+
+
 ; --- Command Dispatch Table ---
 ; Format: .word string_address, handler_address
 ; Terminated by a .word 0
@@ -1839,11 +2018,20 @@ cmd_str_rename:.asciiz "RENAME"
 cmd_str_mv:    .asciiz "MV"
 cmd_str_run:   .asciiz "RUN"
 empty_str:     .asciiz ""
+str_bin_prefix:.asciiz "/BIN/"
+str_bin_suffix:.asciiz ".BIN"
+str_run_prefix:.asciiz "RUN "
 
 START_MSG:       .asciiz "6502 Shell Ready"
 ERR_MSG:         .asciiz "TIMEOUT"
 UNK_MSG:         .asciiz "Unknown Command"
-HELP_MSG:        .asciiz "CMDS: CD, CONNECT, DEL, DIR, EXIT, FORMAT, HELP, LOADMEM, MKDIR, MOUNT, MV, PING, PWD, RENAME, RUN, SAVEMEM, TYPE"
+HELP_MSG:
+    .byte "BUILT-IN COMMANDS:", $0D, $0A
+    .byte "  CD, CONNECT, DEL, DIR, EXIT, FORMAT, HELP", $0D, $0A
+    .byte "  LOADMEM, MKDIR, MOUNT, MV, PING, PWD, RENAME", $0D, $0A
+    .byte "  RUN, SAVEMEM, TYPE", $0D, $0A, $0D, $0A
+    .byte "EXTERNAL COMMANDS (/BIN):", $0D, $0A
+    .byte "  BENCH, COPY", 0
 NOT_MOUNTED_MSG: .asciiz "MEDIA NOT MOUNTED"
 MOUNT_OK_MSG:    .asciiz "MEDIA MOUNTED"
 CONNECT_OK_MSG: .asciiz "CONNECTING"
