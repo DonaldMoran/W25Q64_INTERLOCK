@@ -578,20 +578,65 @@ do_mkdir:
 @mkdir_success:
     rts
 
+; do_del:
+;     jsr guard_requires_mount
+;     bcc @proceed
+;     rts
+; @proceed:
+
+;     ; For now, we assume the argument is an absolute path
+;     ; A real implementation would call resolve_path here.
+;     jsr get_first_arg_as_pico_arg
+
+;     lda #CMD_FS_REMOVE
+;     sta CMD_ID
+;     ; ARG_LEN is set by get_first_arg_as_pico_arg
+;     jsr pico_send_request
+;     bcc @del_ok
+;     jsr timeout_error
+;     rts
+
+; @del_ok:
+;     jsr get_first_arg
+;     lda LAST_STATUS
+;     cmp #STATUS_OK
+;     beq @del_success
+;     cmp #STATUS_NO_FILE
+;     bne @del_fail
+;     jsr print_file_not_found
+;     rts
+; @del_fail:
+;     jsr print_command_failed
+;     rts
+; @del_success:
+;     rts
 do_del:
     jsr guard_requires_mount
     bcc @proceed
     rts
 @proceed:
 
-    jsr get_first_arg_as_pico_arg
+    ; Parse the argument
+    jsr get_first_arg
+    
+    ; Resolve the path against current_path
+    ldx #0                  ; Start at beginning of ARG_BUFF
+    jsr resolve_path_to_arg_buff
+    bcs @path_error         ; Carry set means path too long
+    
+    ; Null terminate the resolved path
+    lda #0
+    sta ARG_BUFF, x
+    inx
+    stx ARG_LEN             ; Store length including null
+
     lda #CMD_FS_REMOVE
     sta CMD_ID
-    ; ARG_LEN is set by get_first_arg_as_pico_arg
     jsr pico_send_request
     bcc @del_ok
     jsr timeout_error
     rts
+
 @del_ok:
     lda LAST_STATUS
     cmp #STATUS_OK
@@ -600,10 +645,18 @@ do_del:
     bne @del_fail
     jsr print_file_not_found
     rts
+    
 @del_fail:
     jsr print_command_failed
+    rts
+    
 @del_success:
     rts
+
+@path_error:
+    jsr print_command_failed    ; Reuse existing argument error message
+    rts
+
 
 do_mount:
     lda #CMD_FS_MOUNT
