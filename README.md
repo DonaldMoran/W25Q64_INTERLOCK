@@ -29,18 +29,29 @@ The 65C02 computer issues commands, which are transmitted through the 6522 VIA t
 *   **FORMAT**: Format the W25Q64 Flash Memory
 *   **PING**: Ping the Raspberry Pi Pico W
 *   **HELP**: Lists available commands.
-*   **CONNECT**: Connects to the configured WIFI Network
+*   **CONNECT [SSID] [PASSWORD]**: Connect to Wi-Fi. Saves credentials to flash. If args omitted, uses stored credentials.
 *   **EXIT**: Exits the shell and returns to the WozMon
 *   **SAVEMEM [START_HEX] [END_HEX] [FILENAME]**: Save a region of 6502 memory to a file on the W25Q64 flash.
 *   **LOADMEM [ADDRESS_HEX] [FILENAME]**: Load a file from flash into 6502 memory.
 *   **RUN [FILENAME]**: Load a binary file and execute it. The file must contain a 2-byte header indicating the load address.
-*   **COPY [SRC] [DST]**: Copy a file. (External)
+*   **COPY [SRC] [DST]** (Alias: **CP**): Copy a file.
+*   **TOUCH [FILENAME]**: Create an empty file.
 *   **BENCH**: Run filesystem benchmark. (External)
 
 ### External Commands
 Commands marked as (External) are transient programs. The shell supports implicit execution of these commands: if a command is not found internally, the shell looks for a file named `/BIN/[COMMAND].BIN`.
 
 For example, typing `BENCH` will execute `/BIN/BENCH.BIN`.
+
+Source code for transient commands is located in `6502/ca65/commands`.
+
+## Future Development
+
+*   **WRITE [PATH]**: A transient command for creating or appending to text files.
+    *   Multi-line input mode.
+    *   Supports relative paths.
+    *   Exit via Ctrl+Z or Ctrl+X.
+    *   To be implemented as a transient program.
 
 ## 2. Communication Protocol
 
