@@ -26,6 +26,14 @@ extern struct lfs_config w25q_cfg;
 lfs_t lfs;
 static bool fs_mounted = false;
 
+// Add near top with other globals (around line 40)
+typedef enum {
+    STATE_IDLE,
+    STATE_SAVEMEM_STREAM,
+    STATE_LOADMEM_STREAM
+} pico_state_t;
+
+
 // --- FILE HANDLE SYSTEM ---
 #define MAX_OPEN_FILES 4
 
@@ -41,6 +49,14 @@ void init_handles() {
         open_files[i].used = false;
     }
 }
+
+pico_state_t current_state = STATE_IDLE;
+uint16_t stream_bytes_remaining = 0;
+lfs_file_t stream_file;
+#define SAVEMEM_BUF_SIZE 256
+uint8_t savemem_buf[SAVEMEM_BUF_SIZE];
+uint16_t savemem_buf_pos = 0;
+uint16_t savemem_buf_fill = 0;
 
 // --- HTTP CLIENT HELPERS ---
 #define HTTP_BUF_SIZE 32768
@@ -152,6 +168,83 @@ int main() {
 
     while (1) {
         cyw43_arch_poll(); // Essential for Wi-Fi background operations
+
+    // --- NEW: Handle streaming state ---
+    if (current_state == STATE_SAVEMEM_STREAM) {
+        uint8_t data = bus_read_byte();
+        savemem_buf[savemem_buf_pos++] = data;
+        stream_bytes_remaining--;
+
+        // Write to file if buffer is full OR if this is the last data byte
+        if (savemem_buf_pos == SAVEMEM_BUF_SIZE || stream_bytes_remaining == 0) {
+            int written = lfs_file_write(&lfs, &stream_file, savemem_buf, savemem_buf_pos);
+            if (written != savemem_buf_pos) {
+                lfs_file_close(&lfs, &stream_file); // Attempt to close
+                bus_write_byte(STATUS_ERR);
+                bus_write_byte(0); bus_write_byte(0);
+                current_state = STATE_IDLE;
+                bus_reset_handshake();
+                continue;
+            }
+            savemem_buf_pos = 0; // Reset buffer
+        }
+
+        if (stream_bytes_remaining == 0) {
+            // Now perform the slow file close operation
+            int err = lfs_file_close(&lfs, &stream_file);
+
+            // And send the final status to the waiting 6502
+            if(err){
+                printf("SAVEMEM: File close failed, err=%d\n", err);
+                bus_write_byte(STATUS_ERR);
+                bus_write_byte(0); bus_write_byte(0);
+            } else {
+                printf("SAVEMEM: Complete\n");
+                bus_write_byte(STATUS_OK);
+                bus_write_byte(0); bus_write_byte(0);
+            }
+            current_state = STATE_IDLE;
+            bus_reset_handshake();
+        }
+        continue; // Skip normal command processing
+    }
+    
+    // --- NEW: Handle LOADMEM streaming state ---
+    if (current_state == STATE_LOADMEM_STREAM) {
+        if (stream_bytes_remaining > 0) {
+            // Refill buffer if empty
+            if (savemem_buf_pos >= savemem_buf_fill) {
+                lfs_ssize_t read = lfs_file_read(&lfs, &stream_file, savemem_buf, 
+                                               (stream_bytes_remaining > SAVEMEM_BUF_SIZE) ? SAVEMEM_BUF_SIZE : stream_bytes_remaining);
+                if (read <= 0) {
+                    // Error or unexpected EOF. Fill with 0 to prevent 6502 hang.
+                    memset(savemem_buf, 0, SAVEMEM_BUF_SIZE);
+                    read = (stream_bytes_remaining > SAVEMEM_BUF_SIZE) ? SAVEMEM_BUF_SIZE : stream_bytes_remaining;
+                }
+                savemem_buf_fill = read;
+                savemem_buf_pos = 0;
+            }
+            
+            bus_write_byte(savemem_buf[savemem_buf_pos++]);
+            stream_bytes_remaining--;
+        } 
+        
+        if (stream_bytes_remaining == 0) {
+             lfs_file_close(&lfs, &stream_file);
+             printf("LOADMEM: Complete\n");
+             current_state = STATE_IDLE;
+             bus_reset_handshake();
+        }
+        continue;
+    }
+    
+    
+    
+    
+    
+
+
+
         // ----------------------------------------------------------
 
         //Test communication
@@ -347,7 +440,11 @@ int main() {
                     // Works for files and empty directories
                     const char *path = (const char *)arg_buf;
                     int err = lfs_remove(&lfs, path);
-                    resp_buf[0] = (err == 0) ? STATUS_OK : STATUS_ERR;
+                    if (err == LFS_ERR_NOENT) {
+                        resp_buf[0] = STATUS_NO_FILE;
+                    } else {
+                        resp_buf[0] = (err == 0) ? STATUS_OK : STATUS_ERR;
+                    }
                     payload_len = 0;
                 }
                 break;
@@ -356,7 +453,11 @@ int main() {
                 {
                     const char *path = (const char *)arg_buf;
                     int err = lfs_mkdir(&lfs, path);
-                    resp_buf[0] = (err == 0) ? STATUS_OK : STATUS_ERR;
+                    if (err == LFS_ERR_EXIST) {
+                        resp_buf[0] = STATUS_EXIST;
+                    } else {
+                        resp_buf[0] = (err == 0) ? STATUS_OK : STATUS_ERR;
+                    }
                     payload_len = 0;
                 }
                 break;
@@ -388,7 +489,13 @@ int main() {
                         resp_buf[0] = STATUS_ERR;
                     } else {
                         int err = lfs_rename(&lfs, old_path, new_path);
-                        resp_buf[0] = (err == 0) ? STATUS_OK : STATUS_ERR;
+                        if (err == LFS_ERR_NOENT) {
+                            resp_buf[0] = STATUS_NO_FILE;
+                        } else if (err == LFS_ERR_EXIST) {
+                            resp_buf[0] = STATUS_EXIST;
+                        } else {
+                            resp_buf[0] = (err == 0) ? STATUS_OK : STATUS_ERR;
+                        }
                     }
                     payload_len = 0;
                 }
@@ -441,7 +548,11 @@ int main() {
                             }
                             resp_buf[0] = STATUS_OK;
                         } else {
-                            resp_buf[0] = STATUS_ERR;
+                            if (err_src == LFS_ERR_NOENT) {
+                                resp_buf[0] = STATUS_NO_FILE;
+                            } else {
+                                resp_buf[0] = STATUS_ERR;
+                            }
                         }
                         if (err_src == 0) lfs_file_close(&lfs, &f_src);
                         if (err_dst == 0) lfs_file_close(&lfs, &f_dst);
@@ -466,7 +577,11 @@ int main() {
                         // Open for Read/Write, Create if missing
                         int err = lfs_file_open(&lfs, &open_files[handle].file, path, LFS_O_RDWR | LFS_O_CREAT);
                         if (err) {
-                            resp_buf[0] = STATUS_ERR;
+                            if (err == LFS_ERR_NOENT) {
+                                resp_buf[0] = STATUS_NO_FILE;
+                            } else {
+                                resp_buf[0] = STATUS_ERR;
+                            }
                         } else {
                             open_files[handle].used = true;
                             lfs_soff_t size = lfs_file_size(&lfs, &open_files[handle].file);
@@ -601,7 +716,11 @@ int main() {
                         payload_ptr[4] = (info.size >> 24) & 0xFF;
                         payload_len = 5;
                     } else {
-                        resp_buf[0] = STATUS_ERR;
+                        if (err == LFS_ERR_NOENT) {
+                            resp_buf[0] = STATUS_NO_FILE;
+                        } else {
+                            resp_buf[0] = STATUS_ERR;
+                        }
                     }
                 }
                 break;
@@ -664,13 +783,58 @@ int main() {
                     // Turn LED off before attempting
                   cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
 
-                    //Hardcoded SSID and Password
-                    const char *ssid = WIFI_SSID;
-                    const char *pass = WIFI_PASSWORD;
+                    char ssid[64] = {0};
+                    char pass[64] = {0};
+                    bool have_creds = false;
 
-                    // Args: "SSID\0PASSWORD"
-                    //const char *ssid = (const char *)arg_buf;
-                    // const char *pass = ssid + strlen(ssid) + 1;
+                    if (arg_len > 0) {
+                        // Args provided: "SSID\0PASSWORD" -> Save to flash
+                        const char *s = (const char *)arg_buf;
+                        const char *p = s + strlen(s) + 1;
+                        if ((uint8_t*)p < arg_buf + arg_len) {
+                            strncpy(ssid, s, sizeof(ssid)-1);
+                            strncpy(pass, p, sizeof(pass)-1);
+                            
+                            // Save to file
+                            lfs_file_t file;
+                            if (lfs_file_open(&lfs, &file, "wifi.cfg", LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC) == 0) {
+                                char buf[128];
+                                int len = snprintf(buf, sizeof(buf), "%s\n%s", ssid, pass);
+                                lfs_file_write(&lfs, &file, buf, len);
+                                lfs_file_close(&lfs, &file);
+                            }
+                            have_creds = true;
+                        }
+                    } else {
+                        // No args: Load from file
+                        lfs_file_t file;
+                        if (lfs_file_open(&lfs, &file, "wifi.cfg", LFS_O_RDONLY) == 0) {
+                            char buf[128] = {0};
+                            lfs_ssize_t len = lfs_file_read(&lfs, &file, buf, sizeof(buf)-1);
+                            lfs_file_close(&lfs, &file);
+                            
+                            if (len > 0) {
+                                buf[len] = 0;
+                                char *nl = strchr(buf, '\n');
+                                if (nl) {
+                                    *nl = 0;
+                                    strncpy(ssid, buf, sizeof(ssid)-1);
+                                    strncpy(pass, nl+1, sizeof(pass)-1);
+                                    // Remove potential trailing CR/LF from pass
+                                    char *r = strpbrk(pass, "\r\n");
+                                    if (r) *r = 0;
+                                    have_creds = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!have_creds) {
+                        printf("Wi-Fi: No credentials provided or found in wifi.cfg\n");
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
                     
                     printf("Connecting to Wi-Fi: %s\n", ssid);
                     
@@ -1037,6 +1201,119 @@ int main() {
                     }
                 }
                 break;
+
+			case CMD_FS_SAVEMEM:
+			{
+			    // Parse args: filename (null-terminated) + 2-byte length (little-endian)
+			    char *filename = (char *)arg_buf;
+			    
+			    // Find the null terminator to locate length bytes
+			    int filename_len = strlen(filename);
+			    uint16_t length = arg_buf[filename_len + 1] | (arg_buf[filename_len + 2] << 8);
+			    
+			    // Validate
+			    if (!fs_mounted) {
+			        printf("SAVEMEM: FS not mounted\n");
+			        bus_write_byte(STATUS_ERR);
+			        bus_write_byte(0); bus_write_byte(0);
+			        break;
+			    }
+			    
+			    if (length == 0 || length > 65535) {
+			        printf("SAVEMEM: Invalid length %d\n", length);
+			        bus_write_byte(STATUS_ERR);
+			        bus_write_byte(0); bus_write_byte(0);
+			        break;
+			    }
+			    
+			    printf("SAVEMEM: File='%s', Length=%u\n", filename, length);
+			    
+			    // Open file (create/overwrite)
+			    int err = lfs_file_open(&lfs, &stream_file, filename,
+			                           LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+			    if (err < 0) {
+			        printf("SAVEMEM: File open failed, err=%d\n", err);
+			        bus_write_byte(STATUS_ERR);
+			        bus_write_byte(0); bus_write_byte(0);
+			        break;
+			    }
+			    
+			    // Send OK header (ready signal)
+			    bus_write_byte(STATUS_OK);
+			    bus_write_byte(0);
+			    bus_write_byte(0);
+			    
+			    // Enter streaming state
+			    stream_bytes_remaining = length;
+			    current_state = STATE_SAVEMEM_STREAM;
+			    savemem_buf_pos = 0; // Reset buffer index
+			    printf("SAVEMEM: Ready to receive %u bytes\n", length);
+			    bus_reset_handshake();
+			    continue;
+			}
+
+            case CMD_FS_LOADMEM:
+            {
+                // Args: [Filename]
+                char *filename = (char *)arg_buf;
+
+                // Truncate at first space (for RUN command with args)
+                char *p = strchr(filename, ' ');
+                if (p) *p = 0;
+                
+                if (!fs_mounted) {
+                    printf("LOADMEM: FS not mounted\n");
+                    bus_write_byte(STATUS_ERR);
+                    bus_write_byte(0); bus_write_byte(0);
+                    break;
+                }
+
+                printf("LOADMEM: File='%s'\n", filename);
+
+                int err = lfs_file_open(&lfs, &stream_file, filename, LFS_O_RDONLY);
+                if (err < 0) {
+                    printf("LOADMEM: File open failed, err=%d\n", err);
+                    if (err == LFS_ERR_NOENT) {
+                        bus_write_byte(STATUS_NO_FILE);
+                    } else {
+                        bus_write_byte(STATUS_ERR);
+                    }
+                    bus_write_byte(0); bus_write_byte(0);
+                    break;
+                }
+
+                lfs_soff_t size = lfs_file_size(&lfs, &stream_file);
+                if (size > 65535) size = 65535; // Cap at 64KB for 6502 safety
+
+                // Send OK header + Length
+                bus_write_byte(STATUS_OK);
+                bus_write_byte(size & 0xFF);
+                bus_write_byte((size >> 8) & 0xFF);
+
+                // Enter streaming state
+                stream_bytes_remaining = (uint16_t)size;
+                current_state = STATE_LOADMEM_STREAM;
+                savemem_buf_pos = 0;
+                savemem_buf_fill = 0; // Force refill
+                
+                printf("LOADMEM: Sending %d bytes\n", (int)size);
+                bus_reset_handshake();
+                continue;
+            }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
             default:
                 resp_buf[0] = STATUS_ERR;

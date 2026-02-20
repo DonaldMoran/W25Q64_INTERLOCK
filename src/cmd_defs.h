@@ -28,6 +28,10 @@
 #define CMD_FS_SYNC     0x21  // Args: [Handle]. Returns: Status
 #define CMD_FS_UNMOUNT  0x22  // Args: None. Returns: Status
 
+// Add with other filesystem commands (around line 30)
+#define CMD_FS_SAVEMEM  0x23  // Args: [Filename]\0[Len(2)]. Streams memory bytes from 6502
+#define CMD_FS_LOADMEM  0x24  // Args: [Filename]. Returns: [Status][Len(2)][Data...]
+
 // --- NETWORK COMMANDS (0x30 - 0x4F) ---
 #define CMD_NET_STATUS     0x30  // Args: None. Returns: Status (0=Down, 1=Up)
 #define CMD_NET_CONNECT    0x31  // Args: [SSID]\0[PASS]. Returns: Status
@@ -43,5 +47,6 @@
 #define STATUS_ERR      0xFF
 #define STATUS_BUSY     0x01
 #define STATUS_NO_FILE  0x02
+#define STATUS_EXIST    0x03
 
 #endif
