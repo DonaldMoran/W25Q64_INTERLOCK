@@ -18,6 +18,7 @@ OUTHEX       = $FFDC    ; Print byte in A as hex (Destroys A)
 PRHEX        = $FFE5    ; Print low nibble of A as hex (Destroys A)
 GETLINE      = $FF0E    ; Monitor entry point (CR + Prompt)
 OUTCH        = $FFEF    ; Print char in A (Preserves A)
+STATUS_EXIST = $03      ; Status code for "File exists"
 
 ; --- Zero Page pointers for strcmp ---
 str_ptr1 = $52 ; 2 bytes
@@ -36,13 +37,13 @@ savemem_start:    .res 2   ; Start address
 savemem_end:      .res 2   ; End address
 savemem_len:      .res 2   ; Computed length
 savemem_cnt:      .res 2   ; Remaining bytes counter
-filename_buf:     .res 32  ; Buffer for filename (null-terminated)
 
 ; --- BSS variables for TYPE ---
 type_is_hex:      .res 1
 hex_buf:          .res 16
 hex_idx:          .res 1
 hex_offset:       .res 2
+pending_cmd:      .res 1
 
 .segment "CMD_SHELL"
 
@@ -426,85 +427,58 @@ do_cd:
     lda (arg_ptr), y
     beq @go_root
 
-    ; 2. Check for ".."
+    ; 2. Check for "." or ".."
     cmp #'.'
-    bne @check_abs
+    bne @resolve_and_verify
     iny
     lda (arg_ptr), y
+    beq @stay_here      ; Match "." exactly
     cmp #'.'
-    bne @check_abs
+    bne @resolve_and_verify
     iny
     lda (arg_ptr), y
     beq @go_up          ; Match ".." exactly
 
-@check_abs:
-    ; 3. Check for absolute path (starts with /)
-    ldy #0
-    lda (arg_ptr), y
-    cmp #'/'
-    beq @absolute_path
-
-    ; 4. Relative path: Append to current_path
-    ; Find end of current_path
+@resolve_and_verify:
+    ; Resolve path to ARG_BUFF
     ldx #0
-@find_end:
-    lda current_path, x
-    beq @found_end
-    inx
-    cpx #126            ; Safety check
-    bcc @find_cont
-    jmp @path_too_long
-@find_cont:
-    jmp @find_end
-@found_end:
-    
-    ; Check if we need a separator
-    cpx #0
-    beq @need_sep       ; Empty? Treat as root context
-    cpx #1
-    bne @check_sep
-    lda current_path
-    cmp #'/'
-    beq @no_sep_needed  ; Root "/" doesn't need extra separator
-@check_sep:
-    dex                 ; Check char before null
-    lda current_path, x
-    inx                 ; Restore X to null position
-    cmp #'/'
-    beq @no_sep_needed
-@need_sep:
-    lda #'/'
-    sta current_path, x
-    inx
-@no_sep_needed:
-    ; Append arg
-    ldy #0
-@append_loop:
-    lda (arg_ptr), y
-    beq @append_done
-    sta current_path, x
-    inx
-    iny
-    cpx #127            ; Check buffer limit
+    jsr resolve_path_to_arg_buff
     bcs @path_too_long
-    jmp @append_loop
-@append_done:
+
+    ; Null terminate and set length
     lda #0
-    sta current_path, x
+    sta ARG_BUFF, x
+    stx ARG_LEN
+
+    ; Verify existence (CMD_FS_STAT)
+    lda #CMD_FS_STAT
+    sta CMD_ID
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    beq @update_path
+    cmp #STATUS_NO_FILE
+    bne @cd_fail
+    jsr print_file_not_found
     rts
 
-@absolute_path:
-    ; Copy arg directly to current_path
-    ldy #0
-@copy_abs:
-    lda (arg_ptr), y
-    sta current_path, y
+@cd_fail:
+    jsr print_command_failed
+    rts
+
+@update_path:
+    ; Copy ARG_BUFF to current_path
+    ldx #0
+@copy_loop:
+    lda ARG_BUFF, x
+    sta current_path, x
     beq @copy_done
-    iny
-    cpy #127
-    bne @copy_abs
+    inx
+    cpx #127
+    bcc @copy_loop
     lda #0
-    sta current_path, y
+    sta current_path, x
 @copy_done:
     rts
 
@@ -513,6 +487,9 @@ do_cd:
     sta current_path
     lda #0
     sta current_path+1
+    rts
+
+@stay_here:
     rts
 
 @go_up:
@@ -552,6 +529,7 @@ do_cd:
     rts
 
 @path_too_long:
+    jsr print_command_failed
     rts
 
 do_mkdir:
@@ -584,6 +562,16 @@ do_mkdir:
     lda LAST_STATUS
     cmp #STATUS_OK
     beq @mkdir_success
+    cmp #STATUS_NO_FILE
+    bne @mkdir_fail
+    jsr print_file_not_found
+    rts
+@mkdir_fail:
+    cmp #STATUS_EXIST
+    bne @mkdir_err
+    jsr print_file_exists
+    rts
+@mkdir_err:
     jsr print_command_failed
 @mkdir_success:
     rts
@@ -759,16 +747,65 @@ do_ping:
     rts
 
 do_connect:
-    ;We should only attempt to connect to the network if we are not already mounted.
-    ;Otherwise it does not function as expected.
-    ;Note: the following is based on your previous implementation
-    ;It hardcodes the network credentials
+    jsr guard_requires_mount
+    bcc @proceed
+    rts
+@proceed:
+    ; Check for arguments (SSID PASSWORD)
+    jsr get_first_arg
+    ldy #0
+    lda (arg_ptr), y
+    beq @use_stored
 
-    ;No need for the mount requirement
+    ; 1. Copy SSID
+    ldx #0
+@copy_ssid:
+    lda (arg_ptr), y
+    beq @ssid_done      ; End of string
+    cmp #' '
+    beq @ssid_done      ; Space separator
+    sta ARG_BUFF, x
+    inx
+    iny
+    jmp @copy_ssid
+@ssid_done:
+    lda #0
+    sta ARG_BUFF, x     ; Null terminate
+    inx ; Skip null
+    
+    ; 2. Get Password
+    jsr get_next_arg
+    bcc @has_pass
+    jmp cmd_arg_error ; SSID provided but no password
+@has_pass:
+    ldy #0
+@copy_pass:
+    lda (arg_ptr), y
+    sta ARG_BUFF, x
+    beq @pass_done
+    inx
+    iny
+    jmp @copy_pass
+@pass_done:
+    inx
+    stx ARG_LEN
+    jmp @send_req
 
-    ; Copy to the Pico's argument buffer.
+@use_stored:
     lda #0              ; No arguments
     sta ARG_LEN
+
+@send_req:
+    ; Print wait message
+    ldx #0
+@wait_loop:
+    lda WAIT_MSG, x
+    beq @wait_done
+    jsr OUTCH
+    inx
+    jmp @wait_loop
+@wait_done:
+    jsr CRLF
 
     lda #CMD_NET_CONNECT
     sta CMD_ID
@@ -784,13 +821,14 @@ do_connect:
     rts
 @connect_success:
     ldx #0
-connect_msg_loop:
+@msg_loop:
     lda CONNECT_OK_MSG, x
-    beq @connect_done
+    beq @done
     jsr OUTCH
     inx
-    jmp connect_msg_loop
-@connect_done:
+    jmp @msg_loop
+@done:
+    jsr CRLF
     rts
 
 do_help:
@@ -903,6 +941,11 @@ do_savemem:
     lda LAST_STATUS
     cmp #STATUS_OK
     beq @start_stream
+    cmp #STATUS_NO_FILE
+    bne @savemem_fail
+    jsr print_file_not_found
+    rts
+@savemem_fail:
     jsr print_command_failed
     rts
 
@@ -1037,6 +1080,23 @@ do_loadmem:
     inx
     stx ARG_LEN     ; Include null terminator
 
+    ; Verify file exists using CMD_FS_STAT
+    lda #CMD_FS_STAT
+    sta CMD_ID
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    beq @loadmem_file_exists
+    cmp #STATUS_NO_FILE
+    bne @loadmem_stat_fail
+    jsr print_file_not_found
+    rts
+@loadmem_stat_fail:
+    jsr print_command_failed
+    rts
+
+@loadmem_file_exists:
     ; --- Manually Send Command (Bypass pico_send_request buffer limit) ---
     lda #$FF
     sta VIA_DDRA    ; Set Port A to Output
@@ -1064,8 +1124,17 @@ do_loadmem:
     beq @status_ok
     
     ; Handle Error
+    pha             ; Save status for checking later
+    jsr read_byte   ; Consume len_lo from bus
+    jsr read_byte   ; Consume len_hi from bus
     lda #$FF
-    sta VIA_DDRA
+    sta VIA_DDRA    ; Restore bus to output
+    pla             ; Restore status
+    cmp #STATUS_NO_FILE
+    bne @loadmem_fail
+    jsr print_file_not_found
+    rts
+@loadmem_fail:
     jsr print_command_failed
     rts
 
@@ -1189,6 +1258,29 @@ do_type:
     inx
     stx ARG_LEN     ; Include null terminator
 
+    ; Verify file exists using CMD_FS_STAT
+    lda #CMD_FS_STAT
+    sta CMD_ID
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    beq @type_file_exists
+    cmp #STATUS_NO_FILE
+    bne @type_stat_fail
+    jsr print_file_not_found
+    rts
+@type_stat_fail:
+    jsr print_command_failed
+    rts
+
+@type_file_exists:
+    ; Restore Y for extension check (ARG_LEN - 1)
+    ldx ARG_LEN
+    dex
+    txa
+    tay
+
     lda #0
     sta type_is_hex
 
@@ -1254,8 +1346,17 @@ do_type:
     beq @status_ok
     
     ; Handle Error
+    pha             ; Save status for checking later
+    jsr read_byte   ; Consume len_lo from bus
+    jsr read_byte   ; Consume len_hi from bus
     lda #$FF
-    sta VIA_DDRA
+    sta VIA_DDRA    ; Restore bus to output
+    pla             ; Restore status
+    cmp #STATUS_NO_FILE
+    bne @type_fail
+    jsr print_file_not_found
+    rts
+@type_fail:
     jsr print_command_failed
     rts
 
@@ -1407,7 +1508,16 @@ print_hex_ascii:
 ; do_rename - Rename a file
 ; Format: RENAME <old> <new>
 ; ---------------------------------------------------------------------------
+do_copy:
+    lda #CMD_FS_COPY
+    sta pending_cmd
+    jmp common_transfer
+
 do_rename:
+    lda #CMD_FS_RENAME
+    sta pending_cmd
+
+common_transfer:
     jsr guard_requires_mount
     bcc @proceed
     rts
@@ -1421,25 +1531,145 @@ do_rename:
 @old_ok:
     lda #0
     sta ARG_BUFF, x
-    inx
-    stx ptr_temp
+    
+    ; Move OLD path to ARG_BUFF + 128 to make room for NEW path
+    ldy #0
+@move_old:
+    lda ARG_BUFF, y
+    sta ARG_BUFF + 128, y
+    beq @move_old_done
+    iny
+    jmp @move_old
+@move_old_done:
 
     ; Parse and resolve new filename
     jsr get_next_arg
     bcc @new_ok_arg
     jmp cmd_arg_error
 @new_ok_arg:
-    ldx ptr_temp
+    ldx #0
     jsr resolve_path_to_arg_buff
     bcc @new_ok_resolve
     jmp cmd_arg_error
 @new_ok_resolve:
     lda #0
     sta ARG_BUFF, x
+    stx ARG_LEN     ; Length of NEW path
+    stx ptr_temp    ; Save length of NEW path for @is_dir_target
+
+    ; Check if NEW path is a directory (Syntactic check: trailing slash)
+    cpx #0
+    beq @check_stat
+    dex
+    lda ARG_BUFF, x
+    cmp #'/'
+    beq @is_dir_target
+    inx ; Restore X
+
+@check_stat:
+    ; Check if NEW path is a directory (Semantic check: STAT)
+
+    lda #CMD_FS_STAT
+    sta CMD_ID
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    bne @not_dir_target
+    
+    lda RESP_BUFF ; Type
+    cmp #2 ; LFS_TYPE_DIR
+    beq @is_dir_target
+
+@not_dir_target:
+    ldx ptr_temp ; Restore len of NEW
+    jmp @construct_args
+
+@is_dir_target:
+    ldx ptr_temp ; Restore len of NEW
+    
+    ; Ensure separator if not present
+    cpx #0
+    beq @find_filename
+    dex
+    lda ARG_BUFF, x
     inx
+    cmp #'/'
+    beq @find_filename
+    lda #'/'
+    sta ARG_BUFF, x
+    inx
+
+@find_filename:
+    ; Find last '/' in OLD path (at ARG_BUFF + 128)
+    ldy #128
+    sty ptr_temp ; Start of filename candidate
+@scan_old:
+    lda ARG_BUFF, y
+    beq @copy_filename
+    cmp #'/'
+    bne @next_char
+    sty ptr_temp
+    inc ptr_temp ; Point after slash
+@next_char:
+    iny
+    jmp @scan_old
+
+@copy_filename:
+    ; Append filename to NEW path
+    ldy ptr_temp
+@copy_loop:
+    lda ARG_BUFF, y
+    beq @copy_done
+    sta ARG_BUFF, x
+    inx
+    iny
+    jmp @copy_loop
+@copy_done:
+    lda #0
+    sta ARG_BUFF, x
+    ; NEW path (at 0) is now "dir/filename"
+
+@construct_args:
+    ; We have NEW at 0. OLD at 128.
+    ; We need OLD at 0, NEW after OLD.
+    
+    ; 1. Move NEW to RESP_BUFF (temp)
+    ldy #0
+@move_new_temp:
+    lda ARG_BUFF, y
+    sta RESP_BUFF, y
+    beq @move_new_done
+    iny
+    jmp @move_new_temp
+@move_new_done:
+
+    ; 2. Move OLD (from 128) to 0
+    ldy #128
+    ldx #0
+@move_old_back:
+    lda ARG_BUFF, y
+    sta ARG_BUFF, x
+    beq @move_old_back_done
+    inx
+    iny
+    jmp @move_old_back
+@move_old_back_done:
+    inx ; Skip null
+
+    ; 3. Append NEW (from RESP_BUFF)
+    ldy #0
+@append_new:
+    lda RESP_BUFF, y
+    sta ARG_BUFF, x
+    beq @append_new_done
+    inx
+    iny
+    jmp @append_new
+@append_new_done:
     stx ARG_LEN
     
-    lda #CMD_FS_RENAME
+    lda pending_cmd
     sta CMD_ID
     jsr pico_send_request
     bcc @rename_ok
@@ -1449,11 +1679,57 @@ do_rename:
     lda LAST_STATUS
     cmp #STATUS_OK
     beq @rename_success
+    cmp #STATUS_NO_FILE
+    bne @rename_fail
+    jsr print_file_not_found
+    rts
+@rename_fail:
+    cmp #STATUS_EXIST
+    bne @rename_err
+    jsr print_file_exists
+    rts
+@rename_err:
     jsr print_command_failed
     rts
 
 @rename_success:
     clc
+    rts
+
+; ---------------------------------------------------------------------------
+; do_touch - Create an empty file
+; Format: TOUCH <filename>
+; ---------------------------------------------------------------------------
+do_touch:
+    jsr guard_requires_mount
+    bcc @proceed
+    rts
+@proceed:
+    jsr get_first_arg
+    ldx #0
+    jsr resolve_path_to_arg_buff
+    bcs @path_error
+    
+    lda #0
+    sta ARG_BUFF, x
+    inx
+    stx ARG_LEN
+
+    lda #CMD_FS_TOUCH
+    sta CMD_ID
+    jsr pico_send_request
+    bcc @touch_ok
+    jsr timeout_error
+    rts
+@touch_ok:
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    beq @touch_success
+    jsr print_command_failed
+@touch_success:
+    rts
+@path_error:
+    jsr print_command_failed
     rts
 
 ; ---------------------------------------------------------------------------
@@ -1605,6 +1881,23 @@ do_run:
     inx
     stx ARG_LEN     ; Include null terminator
 
+    ; Verify file exists using CMD_FS_STAT
+    lda #CMD_FS_STAT
+    sta CMD_ID
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    beq @run_file_exists
+    cmp #STATUS_NO_FILE
+    bne @run_stat_fail
+    jsr print_file_not_found
+    rts
+@run_stat_fail:
+    jsr print_command_failed
+    rts
+
+@run_file_exists:
     ; --- Manually Send Command (Reuse LOADMEM protocol) ---
     lda #$FF
     sta VIA_DDRA    ; Set Port A to Output
@@ -1632,8 +1925,17 @@ do_run:
     beq @status_ok
     
     ; Handle Error
+    pha             ; Save status for checking later
+    jsr read_byte   ; Consume len_lo from bus
+    jsr read_byte   ; Consume len_hi from bus
     lda #$FF
-    sta VIA_DDRA
+    sta VIA_DDRA    ; Restore bus to output
+    pla             ; Restore status
+    cmp #STATUS_NO_FILE
+    bne @run_fail
+    jsr print_file_not_found
+    rts
+@run_fail:
     jsr print_command_failed
     rts
 
@@ -1830,6 +2132,18 @@ print_file_not_found:
     ldx #0
 @loop:
     lda FILE_NOT_FOUND_MSG, x
+    beq @done
+    jsr OUTCH
+    inx
+    jmp @loop
+@done:
+    jsr CRLF
+    rts
+
+print_file_exists:
+    ldx #0
+@loop:
+    lda FILE_EXISTS_MSG, x
     beq @done
     jsr OUTCH
     inx
@@ -2039,11 +2353,14 @@ command_table:
     .word cmd_str_type,  do_type
     .word cmd_str_rename, do_rename
     .word cmd_str_run,   do_run
+    .word cmd_str_copy,  do_copy
+    .word cmd_str_touch, do_touch
     ; Aliases
     .word cmd_str_ls,    do_dir
     .word cmd_str_rm,    do_del
     .word cmd_str_cat,   do_type
     .word cmd_str_mv,    do_rename
+    .word cmd_str_cp,    do_copy
     .word 0 ; End of table
 
 ; --- Command Strings ---
@@ -2066,6 +2383,9 @@ cmd_str_rm:    .asciiz "RM"
 cmd_str_cat:   .asciiz "CAT"
 cmd_str_rename:.asciiz "RENAME"
 cmd_str_mv:    .asciiz "MV"
+cmd_str_copy:  .asciiz "COPY"
+cmd_str_cp:    .asciiz "CP"
+cmd_str_touch: .asciiz "TOUCH"
 cmd_str_run:   .asciiz "RUN"
 empty_str:     .asciiz ""
 str_bin_prefix:.asciiz "/BIN/"
@@ -2077,19 +2397,21 @@ ERR_MSG:         .asciiz "TIMEOUT"
 UNK_MSG:         .asciiz "Unknown Command"
 HELP_MSG:
     .byte "BUILT-IN COMMANDS:", $0D, $0A
-    .byte "  CD, CONNECT, DEL, DIR, EXIT, FORMAT, HELP", $0D, $0A
-    .byte "  LOADMEM, MKDIR, MOUNT, MV, PING, PWD, RENAME", $0D, $0A
-    .byte "  RUN, SAVEMEM, TYPE", $0D, $0A, $0D, $0A
+    .byte "  CD, CONNECT, COPY(cp), DEL(rm), DIR(ls), EXIT, FORMAT", $0D, $0A
+    .byte "  HELP, LOADMEM, MKDIR, MOUNT, PING, PWD", $0D, $0A
+    .byte "  RENAME(mv), RUN, SAVEMEM, TOUCH, TYPE(cat)", $0D, $0A, $0D, $0A
     .byte "EXTERNAL COMMANDS (/BIN):", $0D, $0A
-    .byte "  BENCH, COPY", 0
+    .byte "  BENCH", 0
 NOT_MOUNTED_MSG: .asciiz "MEDIA NOT MOUNTED"
 MOUNT_OK_MSG:    .asciiz "MEDIA MOUNTED"
-CONNECT_OK_MSG: .asciiz "CONNECTING"
+CONNECT_OK_MSG: .asciiz "CONNECTED"
 MOUNT_FAIL_MSG:  .asciiz "MOUNT FAILED"
 FORMAT_OK_MSG:   .asciiz "FORMAT COMPLETE"
 FORMAT_FAIL_MSG: .asciiz "FORMAT FAILED"
 COMMAND_FAILED_MSG: .asciiz "COMMAND FAILED"
-FILE_NOT_FOUND_MSG: .asciiz "FILE NOT FOUND"
+FILE_NOT_FOUND_MSG: .asciiz "NO SUCH FILE OR DIRECTORY"
+FILE_EXISTS_MSG:    .asciiz "FILE EXISTS"
+WAIT_MSG:           .asciiz "Please wait..."
 
 ; --- SAVEMEM Messages ---
 SAVING_MSG:         .asciiz "Saving..."

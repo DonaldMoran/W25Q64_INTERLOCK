@@ -47,5 +47,6 @@
 #define STATUS_ERR      0xFF
 #define STATUS_BUSY     0x01
 #define STATUS_NO_FILE  0x02
+#define STATUS_EXIST    0x03
 
 #endif
