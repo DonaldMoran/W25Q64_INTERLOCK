@@ -38,6 +38,12 @@ savemem_len:      .res 2   ; Computed length
 savemem_cnt:      .res 2   ; Remaining bytes counter
 filename_buf:     .res 32  ; Buffer for filename (null-terminated)
 
+; --- BSS variables for TYPE ---
+type_is_hex:      .res 1
+hex_buf:          .res 16
+hex_idx:          .res 1
+hex_offset:       .res 2
+
 .segment "CMD_SHELL"
 
 start:
@@ -1001,6 +1007,446 @@ timeout_error:
     rts
 
 ; ---------------------------------------------------------------------------
+; do_type - Type file content to screen
+; Format: TYPE <filename>
+; ---------------------------------------------------------------------------
+do_type:
+    jsr guard_requires_mount
+    bcc @proceed
+    rts
+@proceed:
+    ; Parse filename
+    jsr get_first_arg
+    
+    ; Copy filename to ARG_BUFF and check extension
+    ldy #0
+    lda #0
+    sta type_is_hex
+
+@copy_loop:
+    lda (arg_ptr), y
+    sta ARG_BUFF, y
+    beq @copy_done
+    iny
+    jmp @copy_loop
+@copy_done:
+    sty ARG_LEN
+    inc ARG_LEN     ; Include null terminator
+
+    ; Check for .BIN extension (Case insensitive)
+    ; Y is length. We need at least 4 chars (.BIN)
+    cpy #4
+    bcc @not_bin
+    
+    ; Check last 4 chars: . B I N
+    dey
+    lda ARG_BUFF, y
+    and #%11011111 ; To Upper
+    cmp #'N'
+    bne @not_bin
+    
+    dey
+    lda ARG_BUFF, y
+    and #%11011111
+    cmp #'I'
+    bne @not_bin
+    
+    dey
+    lda ARG_BUFF, y
+    and #%11011111
+    cmp #'B'
+    bne @not_bin
+    
+    dey
+    lda ARG_BUFF, y
+    cmp #'.'
+    bne @not_bin
+    
+    ; It is .BIN
+    lda #1
+    sta type_is_hex
+
+@not_bin:
+    ; Send CMD_FS_LOADMEM (Reusing LOADMEM to stream file)
+    lda #$FF
+    sta VIA_DDRA    ; Set Port A to Output
+
+    lda #CMD_FS_LOADMEM
+    jsr send_byte
+
+    lda ARG_LEN
+    jsr send_byte
+
+    ldx #0
+@send_args:
+    lda ARG_BUFF, x
+    jsr send_byte
+    inx
+    cpx ARG_LEN
+    bne @send_args
+
+    ; Receive Response
+    lda #$00
+    sta VIA_DDRA    ; Set Port A to Input
+
+    jsr read_byte   ; Read Status
+    cmp #STATUS_OK
+    beq @status_ok
+    
+    ; Handle Error
+    lda #$FF
+    sta VIA_DDRA
+    jsr print_command_failed
+    rts
+
+@status_ok:
+    jsr read_byte   ; Read Length Low
+    sta savemem_cnt
+    jsr read_byte   ; Read Length High
+    sta savemem_cnt+1
+
+    ; Init Hex Dump variables if needed
+    lda type_is_hex
+    beq @type_loop
+    
+    lda #0
+    sta hex_idx
+    sta hex_offset
+    sta hex_offset+1
+
+@type_loop:
+    lda savemem_cnt
+    ora savemem_cnt+1
+    beq @done
+
+    lda type_is_hex
+    beq @read_next
+    lda hex_idx
+    bne @read_next
+    jsr print_hex_offset
+@read_next:
+    jsr read_byte
+    pha             ; Save byte
+
+    lda type_is_hex
+    beq @print_char
+
+    ; Hex Mode
+    pla
+    ldx hex_idx
+    sta hex_buf, x
+    jsr OUTHEX      ; Print Hex
+    lda #' '
+    jsr OUTCH
+    
+    inc hex_idx
+    lda hex_idx
+    cmp #16
+    bne @dec_cnt
+    
+    ; End of Hex Line
+    jsr print_hex_ascii
+    
+    ; Increment Offset
+    clc
+    lda hex_offset
+    adc #16
+    sta hex_offset
+    lda hex_offset+1
+    adc #0
+    sta hex_offset+1
+    
+    lda #0
+    sta hex_idx
+    jmp @dec_cnt
+
+@print_char:
+    pla
+    jsr OUTCH
+
+@dec_cnt:
+    ; Decrement 16-bit counter
+    lda savemem_cnt
+    bne @dec_lo
+    dec savemem_cnt+1
+@dec_lo:
+    dec savemem_cnt
+    jmp @type_loop
+
+@done:
+    lda #$FF
+    sta VIA_DDRA    ; Restore Port A to Output
+    
+    ; Final Hex Dump cleanup
+    lda type_is_hex
+    beq @finish
+    
+    lda hex_idx
+    beq @finish
+    
+    ; Pad spaces
+    ; Spaces needed = (16 - hex_idx) * 3
+    lda #16
+    sec
+    sbc hex_idx
+    tax
+@pad_loop:
+    lda #' '
+    jsr OUTCH
+    jsr OUTCH
+    jsr OUTCH
+    dex
+    bne @pad_loop
+    
+    jsr print_hex_ascii
+
+@finish:
+    jsr CRLF
+    rts
+
+print_hex_offset:
+    lda hex_offset+1
+    jsr OUTHEX
+    lda hex_offset
+    jsr OUTHEX
+    lda #':'
+    jsr OUTCH
+    lda #' '
+    jsr OUTCH
+    rts
+
+print_hex_ascii:
+    lda #' '
+    jsr OUTCH
+    lda #'|'
+    jsr OUTCH
+    ldx #0
+@ascii_loop:
+    cpx hex_idx
+    beq @ascii_done
+    lda hex_buf, x
+    ; Filter non-printable
+    cmp #$20
+    bcc @dot
+    cmp #$7F
+    bcs @dot
+    jmp @pr
+@dot:
+    lda #'.'
+@pr:
+    jsr OUTCH
+    inx
+    jmp @ascii_loop
+@ascii_done:
+    lda #'|'
+    jsr OUTCH
+    jsr CRLF
+    rts
+
+; ---------------------------------------------------------------------------
+; do_rename - Rename a file
+; Format: RENAME <old> <new>
+; ---------------------------------------------------------------------------
+do_rename:
+    jsr guard_requires_mount
+    bcc @proceed
+    rts
+@proceed:
+    ; Parse old filename
+    jsr get_first_arg
+    
+    ; Copy old filename to ARG_BUFF
+    ldy #0
+    ldx #0
+@copy_old:
+    lda (arg_ptr), y
+    beq @old_done_eol   ; End of string -> Error (missing 2nd arg)
+    cmp #' '
+    beq @old_done_space ; Space -> End of first arg
+    sta ARG_BUFF, x
+    inx
+    iny
+    jmp @copy_old
+@old_done_eol:
+    jmp cmd_arg_error
+@old_done_space:
+    lda #0
+    sta ARG_BUFF, x     ; Null terminate first arg
+    inx                 ; Skip the null separator
+    
+    ; Parse new filename
+    stx ptr_temp ; Save X (offset in ARG_BUFF)
+    jsr get_next_arg
+    bcc @new_ok
+    jmp cmd_arg_error
+@new_ok:
+    ldx ptr_temp ; Restore X
+    ldy #0
+@copy_new:
+    lda (arg_ptr), y
+    beq @new_done       ; End of string -> Done
+    cmp #' '            ; Space -> End of second arg
+    beq @new_done
+    sta ARG_BUFF, x
+    inx
+    iny
+    jmp @copy_new
+@new_done:
+    lda #0
+    sta ARG_BUFF, x     ; Null terminate second arg
+    inx                 ; Include null terminator
+    stx ARG_LEN
+    
+    lda #CMD_FS_RENAME
+    sta CMD_ID
+    jsr pico_send_request
+    bcc @rename_ok
+    jsr timeout_error
+    rts
+@rename_ok:
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    beq @rename_success
+    jsr print_command_failed
+@rename_success:
+    rts
+
+; ---------------------------------------------------------------------------
+; do_run - Load and execute a file
+; Format: RUN <filename>
+; Expects first 2 bytes of file to be load address (Little Endian)
+; ---------------------------------------------------------------------------
+do_run:
+    jsr guard_requires_mount
+    bcc @proceed
+    rts
+@proceed:
+    ; Parse filename
+    jsr get_first_arg
+    
+    ; Copy filename to ARG_BUFF
+    ldy #0
+@copy_loop:
+    lda (arg_ptr), y
+    sta ARG_BUFF, y
+    beq @copy_done
+    iny
+    jmp @copy_loop
+@copy_done:
+    sty ARG_LEN
+    inc ARG_LEN     ; Include null terminator
+
+    ; --- Manually Send Command (Reuse LOADMEM protocol) ---
+    lda #$FF
+    sta VIA_DDRA    ; Set Port A to Output
+
+    lda #CMD_FS_LOADMEM
+    jsr send_byte
+
+    lda ARG_LEN
+    jsr send_byte
+
+    ldx #0
+@send_args:
+    lda ARG_BUFF, x
+    jsr send_byte
+    inx
+    cpx ARG_LEN
+    bne @send_args
+
+    ; --- Receive Response ---
+    lda #$00
+    sta VIA_DDRA    ; Set Port A to Input
+
+    jsr read_byte   ; Read Status
+    cmp #STATUS_OK
+    beq @status_ok
+    
+    ; Handle Error
+    lda #$FF
+    sta VIA_DDRA
+    jsr print_command_failed
+    rts
+
+@status_ok:
+    jsr read_byte   ; Read Length Low
+    sta savemem_cnt
+    jsr read_byte   ; Read Length High
+    sta savemem_cnt+1
+
+    ; Check if length >= 2
+    lda savemem_cnt+1
+    bne @len_ok
+    lda savemem_cnt
+    cmp #2
+    bcs @len_ok
+    
+    ; Error: File too short
+    lda #$FF
+    sta VIA_DDRA
+    jsr print_command_failed
+    rts
+
+@len_ok:
+    ; Read Load Address (2 bytes)
+    jsr read_byte
+    sta savemem_start     ; Low byte
+    jsr read_byte
+    sta savemem_start+1   ; High byte
+    
+    ; Adjust length counter (subtract 2)
+    sec
+    lda savemem_cnt
+    sbc #2
+    sta savemem_cnt
+    lda savemem_cnt+1
+    sbc #0
+    sta savemem_cnt+1
+    
+    ; Set write pointer
+    lda savemem_start
+    sta ptr_temp
+    lda savemem_start+1
+    sta ptr_temp+1
+
+@load_loop:
+    lda savemem_cnt
+    ora savemem_cnt+1
+    beq @done
+
+    jsr read_byte
+    ldy #0
+    sta (ptr_temp), y
+
+    inc ptr_temp
+    bne @no_inc
+    inc ptr_temp+1
+@no_inc:
+    
+    ; Decrement 16-bit counter
+    lda savemem_cnt
+    bne @dec_lo
+    dec savemem_cnt+1
+@dec_lo:
+    dec savemem_cnt
+    jmp @load_loop
+
+@done:
+    lda #$FF
+    sta VIA_DDRA    ; Restore Port A to Output
+    
+    jsr CRLF
+    
+    ; Execute via trampoline
+    lda savemem_start
+    sta str_ptr1
+    lda savemem_start+1
+    sta str_ptr1+1
+    
+    jsr call_handler_indirect
+    rts
+
+; ---------------------------------------------------------------------------
 ; guard_requires_mount
 ; Checks if the filesystem is mounted. If not, prints an error message
 ; and returns with Carry SET. If mounted, returns with Carry CLEAR.
@@ -1140,8 +1586,7 @@ strcmp_space:
     ldy #0
 @loop:
     lda (str_ptr2), y
-    cmp #0
-    beq @end_of_str2 ; End of command table string
+    beq @check_input_end  ; End of command string
 
     cmp (str_ptr1), y
     bne @no_match
@@ -1149,20 +1594,23 @@ strcmp_space:
     iny
     jmp @loop
 
-@end_of_str2:
-    ; Table string ended. Check if input string also ends (or has a space)
+@check_input_end:
+    ; Command string ended, check if input ended or has space
     lda (str_ptr1), y
-    cmp #0
-    beq @match ; Match if both are null
+    beq @match           ; Both ended
     cmp #' '
-    ; beq @match ; Match if input has a space (Z will be set)
-
-@match:
-    ; Z flag is set if they match
+    beq @match           ; Input has space (command only)
+    
+@no_match:
+    ; Clear Z flag to indicate no match
+    lda #1
+    cmp #0
     rts
 
-@no_match:
-    ; Strings are different. Z flag is clear.
+@match:
+    ; Set Z flag to indicate match
+    lda #0
+    cmp #0
     rts
 
 ; ---------------------------------------------------------------------------
@@ -1237,7 +1685,6 @@ get_first_arg_as_pico_arg:
 ; ---------------------------------------------------------------------------
 get_next_arg:
     ldy #0
-    ; 1. Find end of current argument (space or null)
 @find_end:
     lda (arg_ptr), y
     beq @no_more_args
@@ -1247,25 +1694,22 @@ get_next_arg:
     jmp @find_end
 
 @found_end:
-    ; 2. Skip any subsequent spaces
 @skip_spaces:
     iny
     lda (arg_ptr), y
     beq @no_more_args
     cmp #' '
-    bne @found_next_arg
-    jmp @skip_spaces
+    beq @skip_spaces
 
-@found_next_arg:
-    ; 3. Found start of next arg. Update arg_ptr.
+    ; Found start of next arg
     tya
     clc
     adc arg_ptr
     sta arg_ptr
-    bcc @done
+    bcc @success
     inc arg_ptr+1
-@done:
-    clc ; Success
+@success:
+    clc
     rts
 
 @no_more_args:
@@ -1275,7 +1719,7 @@ get_next_arg:
 ; ---------------------------------------------------------------------------
 ; parse_hex_word - Parse hex word from (arg_ptr)
 ; Returns: A/X = 16-bit value (A=lo, X=hi), Carry set on error
-; Clobbers: Y, $F0, $F1
+; Clobbers: Y, ptr_temp
 ; ---------------------------------------------------------------------------
 parse_hex_word:
     ldy #0
@@ -1363,6 +1807,14 @@ command_table:
     .word cmd_str_exit,  do_exit
     .word cmd_savemem_str, do_savemem
     .word cmd_loadmem_str, do_loadmem
+    .word cmd_str_type,  do_type
+    .word cmd_str_rename, do_rename
+    .word cmd_str_run,   do_run
+    ; Aliases
+    .word cmd_str_ls,    do_dir
+    .word cmd_str_rm,    do_del
+    .word cmd_str_cat,   do_type
+    .word cmd_str_mv,    do_rename
     .word 0 ; End of table
 
 ; --- Command Strings ---
@@ -1379,12 +1831,19 @@ cmd_str_connect: .asciiz "CONNECT"
 cmd_str_exit:  .asciiz "EXIT"
 cmd_savemem_str: .asciiz "SAVEMEM"
 cmd_loadmem_str: .asciiz "LOADMEM"
+cmd_str_type:  .asciiz "TYPE"
+cmd_str_ls:    .asciiz "LS"
+cmd_str_rm:    .asciiz "RM"
+cmd_str_cat:   .asciiz "CAT"
+cmd_str_rename:.asciiz "RENAME"
+cmd_str_mv:    .asciiz "MV"
+cmd_str_run:   .asciiz "RUN"
 empty_str:     .asciiz ""
 
 START_MSG:       .asciiz "6502 Shell Ready"
 ERR_MSG:         .asciiz "TIMEOUT"
 UNK_MSG:         .asciiz "Unknown Command"
-HELP_MSG:        .asciiz "CMDS: CD, CONNECT, DEL, DIR, EXIT, FORMAT, HELP, LOADMEM, MKDIR, MOUNT, PING, PWD, SAVEMEM"
+HELP_MSG:        .asciiz "CMDS: CD, CONNECT, DEL, DIR, EXIT, FORMAT, HELP, LOADMEM, MKDIR, MOUNT, MV, PING, PWD, RENAME, RUN, SAVEMEM, TYPE"
 NOT_MOUNTED_MSG: .asciiz "MEDIA NOT MOUNTED"
 MOUNT_OK_MSG:    .asciiz "MEDIA MOUNTED"
 CONNECT_OK_MSG: .asciiz "CONNECTING"
