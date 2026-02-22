@@ -1,0 +1,1 @@
+tree -I 'build|1_8j|littlefs|four-bit-mode-msbasic' --prune

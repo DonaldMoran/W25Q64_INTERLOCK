@@ -11,6 +11,18 @@
 ;   - Dependencies: Statically links pico_lib.s for Phase 1
 ; -----------------------------------------------------------------------------
 
+; ---------------------------------------------------------------------------
+; Explicitly declare external symbols from pico_lib.s
+; ---------------------------------------------------------------------------
+.import pico_send_request, send_byte, read_byte
+.import pico_init  ; <-- ADD THIS LINE
+.import CMD_ID, ARG_LEN, ARG_BUFF, LAST_STATUS, RESP_LEN, RESP_BUFF
+
+; ---------------------------------------------------------------------------
+; Include constants (optional - can use numeric values)
+; ---------------------------------------------------------------------------
+.include "../common/pico_def.inc"
+
 ; -----------------------------------------------------------------------------
 ; CONFIGURATION
 ; -----------------------------------------------------------------------------
@@ -20,7 +32,11 @@ ITERATIONS  = 16        ; Number of chunks to read (Total = 4 KB)
 
 ; Zero page pointers
 print_ptr    = $5A
+; bench/bench.s
+; REMOVE this line if it exists:
+; .include "../common/pico_lib.s"
 
+; Rest of your code...
 ; -----------------------------------------------------------------------------
 ; BINARY HEADER (Required for BRUN)
 ; -----------------------------------------------------------------------------
@@ -148,5 +164,3 @@ MsgStart:   .asciiz "BENCHMARK: READING 4KB..."
 MsgRun:     .asciiz "RUNNING..."
 MsgError:   .asciiz "ERR: BENCH.DAT MISSING."
 MsgDone:    .asciiz "DONE."
-
-.include "common/pico_lib.s"
