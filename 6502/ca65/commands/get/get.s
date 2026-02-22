@@ -55,6 +55,12 @@ start:
     tya
     pha
 
+    ; Save CWD pointer passed from shell in $5E/$5F
+    lda t_ptr_temp
+    sta cwd_ptr
+    lda t_ptr_temp+1
+    sta cwd_ptr+1
+
     ; 1. Parse Arguments
     ; -----------------------------------------------------------------------
     ; Scan INPUT_BUFFER for the command name and skip it
@@ -185,6 +191,44 @@ start:
     beq @skip_spaces_3
     
     ; Found second arg, copy it
+    ; Check if absolute
+    lda (t_arg_ptr), y
+    cmp #'/'
+    beq @copy_local
+
+    ; Relative: Prepend CWD
+    ; Save Y (index in t_arg_ptr)
+    sty t_ptr_temp
+    
+    ; Setup pointer to CWD
+    lda cwd_ptr
+    sta t_str_ptr2
+    lda cwd_ptr+1
+    sta t_str_ptr2+1
+    
+    ldy #0
+@copy_cwd_local:
+    lda (t_str_ptr2), y
+    beq @cwd_local_done
+    sta ARG_BUFF, x
+    inx
+    iny
+    bne @copy_cwd_local
+@cwd_local_done:
+    ; Append '/' if not root
+    lda (t_str_ptr2)
+    cmp #'/'
+    bne @add_slash
+    ldy #1
+    lda (t_str_ptr2), y
+    beq @restore_y
+@add_slash:
+    lda #'/'
+    sta ARG_BUFF, x
+    inx
+@restore_y:
+    ldy t_ptr_temp ; Restore Y
+
 @copy_local:
     lda (t_arg_ptr), y
     beq @local_done
@@ -219,6 +263,37 @@ start:
     ldy #0              ; Use full path
     
 @copy_filename_portion:
+    ; We are using a filename derived from remote path. It is relative.
+    ; Prepend CWD.
+    sty t_ptr_temp ; Save Y (start of filename in remote path)
+    
+    lda cwd_ptr
+    sta t_str_ptr2
+    lda cwd_ptr+1
+    sta t_str_ptr2+1
+    
+    ldy #0
+@copy_cwd_imp:
+    lda (t_str_ptr2), y
+    beq @cwd_imp_done
+    sta ARG_BUFF, x
+    inx
+    iny
+    bne @copy_cwd_imp
+@cwd_imp_done:
+    lda (t_str_ptr2)
+    cmp #'/'
+    bne @add_slash_imp
+    ldy #1
+    lda (t_str_ptr2), y
+    beq @restore_y_imp
+@add_slash_imp:
+    lda #'/'
+    sta ARG_BUFF, x
+    inx
+@restore_y_imp:
+    ldy t_ptr_temp
+
     ; Copy from (t_arg_ptr + Y) until space or null
     ; Note: We can't easily index (ptr),y if y is large and we loop
     ; So we just loop and re-check chars
@@ -430,7 +505,7 @@ done:
 ; ---------------------------------------------------------------------------
 .segment "RODATA"
 
-filename_cfg:    .asciiz "server.cfg"
+filename_cfg:    .asciiz "/server.cfg"
 msg_usage:       .asciiz "Usage: GET <remote_file> [local_file]"
 msg_downloading: .asciiz "Downloading..."
 msg_done:        .asciiz "Done"
@@ -444,3 +519,4 @@ msg_bad_cfg:     .asciiz "Error: Invalid server.cfg"
 .segment "BSS"
 
 server_cfg_data: .res 32  ; Buffer for IP:Port string
+cwd_ptr:         .res 2   ; Pointer to CWD string
