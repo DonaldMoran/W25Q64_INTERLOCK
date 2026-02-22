@@ -4,8 +4,8 @@ cmake_minimum_required(VERSION 3.13)
 # This must be set before project() to ensure the toolchain picks it up correctly
 set(PICO_BOARD pico_w CACHE STRING "Board type" FORCE)
 
-# Pull in the Pico SDK
-include(pico_sdk_import.cmake)
+# Pull in the Pico SDK (correct way — do NOT copy the file locally) 
+include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
 project(6522_smart_device C CXX ASM)
 

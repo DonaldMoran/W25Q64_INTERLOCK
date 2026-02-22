@@ -56,6 +56,12 @@ start:
     tya
     pha
 
+    ; Save CWD pointer passed from shell in $5E/$5F
+    lda t_ptr_temp
+    sta cwd_ptr
+    lda t_ptr_temp+1
+    sta cwd_ptr+1
+
     ; 1. Parse Arguments
     ; -----------------------------------------------------------------------
     ; Scan INPUT_BUFFER for the command name and skip it
@@ -123,6 +129,41 @@ start:
     ; 3. Verify Local File Exists
     ; -----------------------------------------------------------------------
     ; Copy local path to ARG_BUFF for STAT command
+    ; Check if path is absolute (starts with /)
+    ldy #0
+    lda (t_arg_ptr), y
+    cmp #'/'
+    beq @is_absolute
+
+    ; Relative path: Copy CWD first
+    ldx #0
+    
+    ; Setup pointer to CWD
+    lda cwd_ptr
+    sta t_str_ptr2
+    lda cwd_ptr+1
+    sta t_str_ptr2+1
+
+@copy_cwd:
+    lda (t_str_ptr2), y
+    beq @cwd_done
+    sta ARG_BUFF, x
+    inx
+    iny
+    bne @copy_cwd
+@cwd_done:
+    ; Append '/' if not present (unless root)
+    cpx #1
+    beq @is_root ; If len is 1, it must be "/"
+    lda #'/'
+    sta ARG_BUFF, x
+    inx
+@is_root:
+    ; Now append the relative path
+    ldy #0 ; Reset Y for t_arg_ptr
+    jmp @copy_local_stat
+
+@is_absolute:
     ldy #0
     ldx #0
 @copy_local_stat:
@@ -192,6 +233,43 @@ start:
     
     ; C. Copy Local Path (from t_arg_ptr)
     ldy #0
+    ; Check if path is absolute (starts with /)
+    lda (t_arg_ptr), y
+    cmp #'/'
+    beq @copy_local
+
+    ; Relative path: Copy CWD first
+    ; Save Y (index in t_arg_ptr)
+    sty t_ptr_temp
+
+    ; Setup pointer to CWD
+    lda cwd_ptr
+    sta t_str_ptr2
+    lda cwd_ptr+1
+    sta t_str_ptr2+1
+
+@copy_cwd_packet:
+    lda (t_str_ptr2), y
+    beq @cwd_packet_done
+    sta ARG_BUFF, x
+    inx
+    iny
+    bne @copy_cwd_packet
+@cwd_packet_done:
+    ; Append '/' if not root
+    lda (t_str_ptr2)
+    cmp #'/'
+    bne @add_slash_packet
+    ldy #1
+    lda (t_str_ptr2), y
+    beq @restore_y_packet
+@add_slash_packet:
+    lda #'/'
+    sta ARG_BUFF, x
+    inx
+@restore_y_packet:
+    ldy t_ptr_temp ; Restore Y
+
 @copy_local:
     lda (t_arg_ptr), y
     beq @local_done
@@ -464,7 +542,7 @@ done:
 ; ---------------------------------------------------------------------------
 .segment "RODATA"
 
-filename_cfg:    .asciiz "server.cfg"
+filename_cfg:    .asciiz "/server.cfg"
 msg_usage:       .asciiz "Usage: PUT <local_file> [remote_file]"
 msg_uploading:   .asciiz "Uploading..."
 msg_done:        .asciiz "Done"
@@ -479,3 +557,4 @@ msg_bad_cfg:     .asciiz "Error: Invalid server.cfg"
 .segment "BSS"
 
 server_cfg_data: .res 32  ; Buffer for IP:Port string
+cwd_ptr:         .res 2   ; Pointer to CWD string

@@ -20,6 +20,7 @@
 #include "hardware/spi.h"
 #include "pico/multicore.h"
 #include "pico/binary_info.h"
+#include "pico/stdio_usb.h"
 
 #define CHIPS_IMPL
 #include "6502.c"
@@ -475,13 +476,17 @@ int main() {
 
 #ifdef OVERCLOCK
     vreg_set_voltage(VREG_VOLTAGE_1_20); // Safer for 280 MHz
-    sleep_ms(1000);
+    sleep_ms(10);
     set_sys_clock_khz(270000, true);
 #endif
 
     // Initialize USB only (skip UART initialization)
     stdio_usb_init();
-    sleep_ms(2000); // Add delay for USB to initialize
+    // Wait for terminal connection (up to 2s) to avoid missing early output
+    for (int i = 0; i < 20; i++) {
+        if (stdio_usb_connected()) break;
+        sleep_ms(100);
+    }
 
     // Explicitly set UART pins
     uart_init(uart0, BAUD_RATE);

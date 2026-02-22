@@ -89,11 +89,12 @@ For complete command definitions including hex values for network commands (GET,
 
 ## 3. External Commands (Transient Programs)
 
-Commands marked as **(External)** are transient programs loaded from `/BIN/[COMMAND].BIN`.
+Commands marked as **(External)** are transient programs loaded from the filesystem.
 
-If a command is not found internally, the shell automatically searches for:
+If a command is not found internally, the shell automatically searches in the following order:
 
-/BIN/[COMMAND].BIN
+1. **Current Directory:** `[CWD]/[COMMAND].BIN`
+2. **Bin Directory:** `/BIN/[COMMAND].BIN`
 
 Example:
 
@@ -711,17 +712,25 @@ Includes build instructions and testing workflow
 
 Maintains the future ideas section
 
-## 18. Changelog (feature/transient-1)
+```markdown
+## 18. Changelog (feature/transient-2)
 
-The following features were implemented on the `feature/transient-1` branch:
+The following features were implemented on the `feature/transient-2` branch, building upon the transient command architecture established in `feature/transient-1`:
 
-1. **Transient Command Architecture**: Established the pattern for loading and executing external binaries from `/BIN`.
-2. **Network Commands**:
-    - `SETSERVER`: Configures the remote file server address (persisted in `server.cfg`).
-    - `GET`: Downloads files via HTTP.
-    - `PUT`: Uploads files via HTTP.
-    - `NETPING`: Pings the remote file server. Compiled as ping but renamed in BIN directory.
-3. **Firmware Enhancements**:
-    - Implemented `CMD_FS_SAVEMEM` (0x23) streaming protocol for robust file creation.
-    - Implemented `CMD_NET_HTTP_GET` (0x34) and `CMD_NET_HTTP_POST` (0x35).
-    - Fixed argument parsing for external commands to correctly handle the `RUN` prefix.
+1.  **Shell Enhancements**:
+    -   **Smart Execution Path**: The shell now searches for external commands in the **Current Working Directory** first, then falls back to `/BIN/`. This allows executing local binaries immediately.
+    -   **Global Pagination**: Implemented a `--More--` prompt for commands with long output (`DIR`, `TYPE`, `HELP`, `PWD`). The output pauses every 22 lines and waits for a keypress.
+    -   **Relative Path Support**: The shell now passes the Current Working Directory to transient commands via Zero Page ($5E/$5F), enabling them to resolve relative paths.
+    -   **Robustness & Fixes**:
+        -   Fixed a critical bug in `SAVEMEM` where the "Saving..." message overwrote the data pointer.
+        -   Added safety checks to `TYPE` to prevent reading directories as files.
+        -   Improved `try_external` logic to correctly handle argument shifting and ensure absolute paths are passed to the Pico.
+
+2.  **Transient Command Updates**:
+    -   **GET / PUT**: Updated to utilize the CWD pointer. Users can now use relative paths for local files (e.g., `GET file.txt` saves to the current directory).
+    -   **Global Configuration**: Network commands now explicitly look for `/server.cfg` in the root directory, ensuring they function correctly from any subdirectory.
+
+3.  **Previous Features (feature/transient-1)**:
+    -   Transient Command Architecture (`/BIN` execution).
+    -   Network Commands (`SETSERVER`, `GET`, `PUT`, `NETPING`).
+
