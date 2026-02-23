@@ -63,6 +63,9 @@ The 65C02 computer issues commands, which are transmitted through the 6522 VIA t
 | `RUN [FILE]` | | Load and execute binary (requires 2-byte header) |
 | `COPY [SRC] [DST]` | `CP` | Copy file |
 | `TOUCH [FILE]` | | Create empty file |
+| `JUMP [ADDR]` | | Jump to address (e.g. FF00 for WozMon) |
+| `DATE [ARGS]` | | Get/Set System Time (NTP supported) (External) |
+| `WRITE [FILE]` | | Text Editor (External) |
 | `BENCH` | | Run filesystem benchmark (External) |
 | `SETSERVER [IP:PORT]` | | Set/Get file server address (External) |
 | `GET [REMOTE] [LOCAL]` | | Download file via HTTP (External) |
@@ -677,12 +680,6 @@ Done
 ## 16. Future Ideas (Post-Network Access)
 
 ```text
-WRITE [PATH]
-Create or append to text files
-
-Multi-line input mode
-
-Relative path support
 
 Exit via Ctrl+Z or Ctrl+X
 ```
@@ -757,4 +754,3 @@ The following features were implemented on the `feature/transient-2` branch, bui
 3.  **Previous Features (feature/transient-1)**:
     -   Transient Command Architecture (`/BIN` execution).
     -   Network Commands (`SETSERVER`, `GET`, `PUT`, `NETPING`).
-

@@ -213,10 +213,11 @@ IRQ_HANDLER:
                 rti
 
 .include "Krusader_1.3_65C02.asm"
+.include "cmd_shell.s"
+.include "common/pico_lib.s"
 
 ;~ .segment "RESETVEC"
                 ;~ .word   $0F00           ; NMI vector
                 ;~ .word   RESET           ; RESET vector
                 ;~ .word   IRQ_HANDLER     ; IRQ vector
     
-

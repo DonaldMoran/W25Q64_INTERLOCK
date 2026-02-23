@@ -1,24 +1,15 @@
 ; cmd_shell.s - 6502 Shell for Pico W Smart Peripheral
 ; Target: RAM @ $1000
+; Target: ROM @ $E000 (DDOS Segment)
 
 .include "common/pico_def.inc"
 
-.import pico_init, pico_send_request, send_byte, read_byte
-.import CMD_ID, ARG_LEN, ARG_BUFF, LAST_STATUS, RESP_LEN, RESP_BUFF
+.export DDOS_START
 
-; ---------------------------------------------------------------------------
-; System Constants (Derived from eater.lbl)
-; ---------------------------------------------------------------------------
-CHRIN        = $A231    ; Input character from console (A)
-MONCOUT      = $A23D    ; Output character to console (A)
-CRLF         = $FED1    ; Print Carriage Return / Line Feed
-WOZMON       = $FF00    ; WozMon Entry Point
-INPUT_BUFFER = $0300    ; Location of Input Buffer
-OUTHEX       = $FFDC    ; Print byte in A as hex (Destroys A)
-PRHEX        = $FFE5    ; Print low nibble of A as hex (Destroys A)
-GETLINE      = $FF0E    ; Monitor entry point (CR + Prompt)
-OUTCH        = $FFEF    ; Print char in A (Preserves A)
-STATUS_EXIST = $03      ; Status code for "File exists"
+; Compatibility: If RESET is not defined (e.g. RAM build), default to $FF00
+.ifndef RESET
+RESET = $FF00
+.endif
 
 ; --- Zero Page pointers for strcmp ---
 str_ptr1 = $52 ; 2 bytes
@@ -51,10 +42,9 @@ path_buf2:        .res 128 ; Temp buffer for second path
 path_idx:         .res 1   ; Index for search path loop
 line_count:       .res 1   ; Counter for paging
 
-.segment "CMD_SHELL"
+.segment "DDOS"
 
-
-start:
+DDOS_START:
     ; Start on a fresh line
     jsr CRLF
 
@@ -71,9 +61,25 @@ start:
     ; Initialize the VIA and Pico interface
     jsr pico_init
 
-    ; Initialize mount status to not mounted
+    ; --- Auto-Mount / Check Mount Status ---
+    ; We send a MOUNT command. If the Pico is already mounted (via boot logic),
+    ; it will return OK immediately. If not, it will try to mount/format.
+    lda #CMD_FS_MOUNT
+    sta CMD_ID
+    lda #0
+    sta ARG_LEN
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    bne @no_mount
+    lda #1
+    sta is_mounted_flag
+    jmp @mount_done
+@no_mount:
     lda #0
     sta is_mounted_flag
+@mount_done:
 
     ; Initialize current path to root "/"
     lda #'/'
@@ -952,7 +958,7 @@ do_help:
     rts
 
 do_exit:
-    jmp WOZMON
+    jmp RESET
 
 ; ---------------------------------------------------------------------------
 ; do_savemem - Save memory range to file
@@ -1946,6 +1952,18 @@ do_run:
     rts
 
 ; ---------------------------------------------------------------------------
+; do_jump - Jump to address
+; Format: JUMP <address>
+; ---------------------------------------------------------------------------
+do_jump:
+    jsr get_first_arg
+    jsr parse_hex_word
+    bcc @ok
+    jmp cmd_parse_error
+@ok:
+    jmp (ptr_temp)
+
+; ---------------------------------------------------------------------------
 ; common_send_loadmem_request
 ; Sends CMD_FS_LOADMEM and ARG_BUFF. Reads response header.
 ; Returns: A = Status.
@@ -2483,6 +2501,7 @@ command_table:
     .word cmd_str_run,    do_run
     .word cmd_str_copy,   do_copy
     .word cmd_str_touch,  do_touch
+    .word cmd_str_jump,   do_jump
     ; Aliases
     .word cmd_str_ls,    do_dir
     .word cmd_str_rm,    do_del
@@ -2522,6 +2541,7 @@ cmd_str_copy:  .asciiz "COPY"
 cmd_str_cp:    .asciiz "CP"
 cmd_str_touch: .asciiz "TOUCH"
 cmd_str_run:   .asciiz "RUN"
+cmd_str_jump:  .asciiz "JUMP"
 empty_str:     .asciiz ""
 str_bin_prefix:.asciiz "/BIN/"
 current_path_str: .asciiz "."
