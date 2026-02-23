@@ -713,7 +713,31 @@ Includes build instructions and testing workflow
 Maintains the future ideas section
 
 ```markdown
-## 18. Changelog (feature/transient-2)
+## 18. Changelog (On branch feature/transient-3)
+
+### Feature: Transient Text Editor (WRITE)
+
+A new transient command `WRITE` has been implemented, providing a Nano-like text editing experience on the 6502 system.
+
+**Key Features:**
+*   **User Interface:** Full-screen editor with a header displaying the filename and a footer showing command shortcuts.
+*   **Input Handling:**
+    *   Supports standard alphanumeric input.
+    *   Handles `Enter` for newlines and `Tab` for spacing.
+    *   **Backspace:** Implemented visual and buffer-level character deletion.
+    *   **Arrow Keys:** Escape sequence detection is in place to gracefully handle cursor keys.
+*   **File Management:**
+    *   **Launch with Filename:** `WRITE <filename>` opens the editor with the target file pre-set.
+    *   **Launch Empty:** `WRITE` opens a blank buffer.
+    *   **Save & Exit:** Triggered via `Ctrl+X`.
+    *   **Smart Prompting:** If a filename was not provided at launch, the editor prompts the user to enter one upon saving.
+*   **Architecture:**
+    *   Operates as a transient command loaded at `$0800`.
+    *   Utilizes a 4KB fixed memory buffer for text storage.
+    *   Integrates with the shell's Current Working Directory (CWD) for relative path resolution.
+    *   Implements robust stack management to prevent corruption during execution.
+
+**Previous Features (feature/transient-2):**
 
 The following features were implemented on the `feature/transient-2` branch, building upon the transient command architecture established in `feature/transient-1`:
 

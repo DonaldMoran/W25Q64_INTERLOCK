@@ -527,16 +527,16 @@ do_pwd:
     rts
 @proceed:
 
-    ldx #0
-@pwd_loop:
-    lda current_path, x
-    beq @pwd_done
-    jsr shell_outch
-    inx
-    jmp @pwd_loop
+   lda #<current_path
+    sta ptr_temp
+    lda #>current_path
+    sta ptr_temp+1
+    jsr print_string
+    
 @pwd_done:
     jsr CRLF
     rts
+
 
 do_cd:
     jsr guard_requires_mount
