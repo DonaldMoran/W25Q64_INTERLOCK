@@ -4,6 +4,8 @@
 ; ---------------------------------------------------------------------------
 ; External symbols
 ; ---------------------------------------------------------------------------
+.include "pico_def.inc"
+
 .import pico_send_request, send_byte, read_byte
 .import CMD_ID, ARG_LEN, ARG_BUFF, LAST_STATUS, RESP_LEN, RESP_BUFF
 
@@ -11,13 +13,8 @@
 ; System calls & Constants
 ; ---------------------------------------------------------------------------
 OUTCH = $FFEF    ; Print character in A
-CRLF  = $FED1    ; Print CR/LF
-CHRIN = $A231    ; Input character from console
+ACIA_DATA = $5000
 
-VIA_DDRA = $6003 ; Data Direction Register A
-
-CMD_FS_SAVEMEM = $23
-STATUS_OK      = $00
 
 INPUT_BUFFER   = $0300
 
@@ -74,7 +71,7 @@ start:
     ldx #0
     ldy #0
 @clear_buffer:
-    tya
+    lda #0
     sta (t_str_ptr2), y
     iny
     bne @clear_buffer
@@ -128,127 +125,639 @@ editor_loop:
 @check_lf:
     cmp #$0A ; LF (ignore, we handle with CR)
     beq editor_loop  ; This is fine if editor_loop is close
-    
-    cmp #$1B ; ESC (already handled)
-    beq editor_loop  ; This is fine if editor_loop is close
 
     ; Check for other control characters (0x00-0x1F except those we handle)
     cmp #$20
     bcc editor_loop  ; This is fine if editor_loop is close
 
     ; Printable Char (0x20-0x7E)
-    jsr store_char
-    jmp editor_loop
-
-    ; Check for other control characters (0x00-0x1F except those we handle)
-    cmp #$20
-    bcc editor_loop  ; Ignore other control characters
-
-    ; Printable Char (0x20-0x7E)
-    jsr store_char
-    jmp editor_loop
-
+    jsr insert_and_redraw_char
+    jmp loop_continue
 handle_escape:
     ; Handle escape sequences (arrow keys, etc.)
     jsr CHRIN  ; Get next character (usually '[')
     cmp #'['
-    bne editor_loop  ; Not an arrow key sequence
+    beq @is_escape
+    jmp editor_loop  ; Not an arrow key sequence
+@is_escape:
     
     jsr CHRIN  ; Get the arrow key code
     cmp #'A'   ; Up arrow
-    beq @ignore_escape
+    bne @check_B
+    jmp handle_up_arrow
+@check_B:
     cmp #'B'   ; Down arrow
-    beq @ignore_escape
+    bne @check_C
+    jmp handle_down_arrow
+@check_C:
     cmp #'C'   ; Right arrow
-    beq @ignore_escape
+    bne @check_D
+    jmp handle_right_arrow
+@check_D:
     cmp #'D'   ; Left arrow
-    beq @ignore_escape
+    bne @check_H
+    jmp handle_left_arrow
+@check_H:
+    cmp #'H'   ; Home key
+    bne @check_F
+    jmp handle_home
+@check_F:
+    cmp #'F'   ; End key
+    bne @check_3
+    jmp handle_end
+@check_3:
+    cmp #'3'   ; Delete key
+    bne @check_5
+    jmp handle_del_key_entry
+@check_5:
+    cmp #'5'   ; Page Up
+    bne @check_6
+    jmp handle_pgup_entry
+@check_6:
+    cmp #'6'   ; Page Down
+    bne @ignore_escape
+    jmp handle_pgdn_entry
     
     ; If it's not an arrow key, maybe it's a function key
     ; Just ignore it
 @ignore_escape:
-    jmp editor_loop
+    jmp loop_continue
 
 handle_tab:
     ; Handle tab - store a space or multiple spaces
     ; For simplicity, store a single space
     lda #' '
-    jsr store_char
-    jsr OUTCH  ; Echo the space
-    jmp editor_loop
+    jsr insert_and_redraw_char
+    jmp loop_continue
 
-handle_bs:
-    ; Check if we are at start of buffer
+handle_del_key_entry:
+    jsr CHRIN ; Consume '~'
+    jmp handle_del_char
+
+handle_pgup_entry:
+    jsr CHRIN ; Consume '~'
+    jmp handle_pgup
+
+handle_pgdn_entry:
+    jsr CHRIN ; Consume '~'
+    jmp handle_pgdn
+
+handle_left_arrow:
+    ; Check if we are at the start of the buffer
     lda t_str_ptr1
     cmp #<text_buffer_fixed
-    bne @do_bs
+    bne @do_left
     lda t_str_ptr1+1
     cmp #>text_buffer_fixed
-    beq editor_loop ; At start, do nothing
+    bne @do_left
+    jmp loop_continue ; At start, do nothing
 
-@do_bs:
-    ; Decrement pointer (remove last character from buffer)
+@do_left:
+    ; Decrement pointer
     lda t_str_ptr1
-    bne @dec_lo
+    bne @dec_ptr_lo
     dec t_str_ptr1+1
-@dec_lo:
+@dec_ptr_lo:
+    dec t_str_ptr1
+    lda #<ansi_left
+    ldy #>ansi_left
+    jsr print_str_ay
+    jmp loop_continue
+
+handle_right_arrow:
+    ; Check if we are at the end of the text (pointing to null)
+    ldy #0
+    lda (t_str_ptr1), y
+    bne @do_right
+    jmp loop_continue ; At end, do nothing
+
+@do_right:
+    ; Increment pointer
+    inc t_str_ptr1
+    bne @no_inc_ptr_hi
+    inc t_str_ptr1+1
+@no_inc_ptr_hi:
+    lda #<ansi_right
+    ldy #>ansi_right
+    jsr print_str_ay
+    jmp loop_continue
+
+handle_home:
+    jsr move_to_bol
+    ; Visual update: Carriage Return moves cursor to start of line
+    lda #$0D
+    jsr OUTCH
+    jmp loop_continue
+
+handle_end:
+    ; Initialize temp pointer with current position
+    lda t_str_ptr1
+    sta t_ptr_temp
+    lda t_str_ptr1+1
+    sta t_ptr_temp+1
+
+@scan_loop:
+    ; Check char at temp pointer
+    ldy #0
+    lda (t_ptr_temp), y
+    beq @found_end      ; Null terminator (EOF)
+    cmp #$0A            ; LF
+    beq @found_end
+    cmp #$0D            ; CR
+    beq @found_end
+    
+    ; Print char to move cursor visually
+    jsr OUTCH
+    
+    ; Increment temp pointer
+    inc t_ptr_temp
+    bne @no_inc_hi
+    inc t_ptr_temp+1
+@no_inc_hi:
+    jmp @scan_loop
+
+@found_end:
+    ; Update t_str_ptr1 to new position
+    lda t_ptr_temp
+    sta t_str_ptr1
+    lda t_ptr_temp+1
+    sta t_str_ptr1+1
+    jmp loop_continue
+
+; ---------------------------------------------------------------------------
+; Page Up / Down Logic
+; ---------------------------------------------------------------------------
+handle_pgup:
+    jsr move_to_bol ; Start of current line
+    ldx #16         ; Move up 16 lines
+@loop:
+    ; Check if at start of buffer
+    lda t_str_ptr1
+    cmp #<text_buffer_fixed
+    bne @go_prev
+    lda t_str_ptr1+1
+    cmp #>text_buffer_fixed
+    beq @done
+@go_prev:
+    ; Move back one char (into previous line)
+    lda t_str_ptr1
+    bne @dec
+    dec t_str_ptr1+1
+@dec:
     dec t_str_ptr1
     
-    ; Clear the character from buffer (optional but good)
+    jsr move_to_bol
+    dex
+    bne @loop
+@done:
+    jsr redraw_screen
+    jmp loop_continue
+
+handle_pgdn:
+    ldx #16         ; Move down 16 lines
+@line_loop:
+    ; Scan current line until newline or EOF
+@char_loop:
     ldy #0
-    lda #0
-    sta (t_str_ptr1), y
+    lda (t_str_ptr1), y
+    beq @done ; EOF
+    cmp #$0A
+    beq @found_nl
+    cmp #$0D
+    beq @found_nl
     
-    ; Visual Backspace (BS, Space, BS)
-    lda #$08
-    jsr OUTCH
-    lda #' '
-    jsr OUTCH
-    lda #$08
-    jsr OUTCH
-    jmp editor_loop
+    inc t_str_ptr1
+    bne @char_loop
+    inc t_str_ptr1+1
+    jmp @char_loop
+
+@found_nl:
+    ; Skip the newline char to start of next line
+    inc t_str_ptr1
+    bne @check_count
+    inc t_str_ptr1+1
+@check_count:
+    dex
+    bne @line_loop
+
+@done:
+    jsr redraw_screen
+    jmp loop_continue
+
+; ---------------------------------------------------------------------------
+; Up / Down Arrow Logic
+; ---------------------------------------------------------------------------
+handle_up_arrow:
+    jsr get_current_column ; Returns col in t_arg_ptr
+    jsr move_to_bol        ; Go to start of current line
+    
+    ; Check if at start of buffer
+    lda t_str_ptr1
+    cmp #<text_buffer_fixed
+    bne @go_up
+    lda t_str_ptr1+1
+    cmp #>text_buffer_fixed
+    beq @done ; At start, can't go up
+    
+@go_up:
+    ; Move back one char to get into previous line
+    jsr dec_str_ptr1
+    
+    jsr move_to_bol ; Go to start of previous line
+    jsr apply_column ; Advance by t_arg_ptr
+    
+    lda #<ansi_up
+    ldy #>ansi_up
+    jsr print_str_ay
+@done:
+    jmp loop_continue
+
+handle_down_arrow:
+    jsr get_current_column
+    jsr move_to_eol ; Go to end of current line (points to CR or LF or EOF)
+    
+    ; Check if at EOF
+    ldy #0
+    lda (t_str_ptr1), y
+    beq @done ; EOF
+    
+    ; Skip CR/LF to get to start of next line
+    cmp #$0D
+    bne @check_lf
+    jsr inc_str_ptr1
+    ldy #0
+    lda (t_str_ptr1), y
+    cmp #$0A
+    bne @check_done ; Just CR?
+    jsr inc_str_ptr1
+    jmp @next_line
+@check_lf:
+    cmp #$0A
+    bne @next_line ; Should be at next line if not CR/LF
+    jsr inc_str_ptr1
+
+@next_line:
+    ; Check if we hit EOF immediately (empty last line?)
+    ldy #0
+    lda (t_str_ptr1), y
+    beq @done
+    
+    jsr apply_column
+    
+    lda #<ansi_down
+    ldy #>ansi_down
+    jsr print_str_ay
+@check_done:
+@done:
+    jmp loop_continue
+
+; --- Navigation Helpers ---
+
+get_current_column:
+    ; Save current pos to t_str_ptr2
+    lda t_str_ptr1
+    sta t_str_ptr2
+    lda t_str_ptr1+1
+    sta t_str_ptr2+1
+    
+    jsr move_to_bol ; t_str_ptr1 is now at BOL
+    
+    ; Calculate diff (t_str_ptr2 - t_str_ptr1) -> t_arg_ptr
+    sec
+    lda t_str_ptr2
+    sbc t_str_ptr1
+    sta t_arg_ptr
+    lda t_str_ptr2+1
+    sbc t_str_ptr1+1
+    sta t_arg_ptr+1
+    
+    ; Restore current pos
+    lda t_str_ptr2
+    sta t_str_ptr1
+    lda t_str_ptr2+1
+    sta t_str_ptr1+1
+    rts
+
+apply_column:
+    ; Advance t_str_ptr1 by t_arg_ptr, stopping at EOL
+@loop:
+    lda t_arg_ptr
+    ora t_arg_ptr+1
+    beq @done
+    
+    ; Check char at current pos
+    ldy #0
+    lda (t_str_ptr1), y
+    beq @done ; EOF
+    cmp #$0D
+    beq @done
+    cmp #$0A
+    beq @done
+    
+    jsr inc_str_ptr1
+    
+    ; Dec counter
+    lda t_arg_ptr
+    bne @dec_lo
+    dec t_arg_ptr+1
+@dec_lo:
+    dec t_arg_ptr
+    jmp @loop
+@done:
+    rts
+
+move_to_eol:
+    ldy #0
+@loop:
+    lda (t_str_ptr1), y
+    beq @done
+    cmp #$0D
+    beq @done
+    cmp #$0A
+    beq @done
+    
+    jsr inc_str_ptr1
+    jmp @loop
+@done:
+    rts
+
+dec_str_ptr1:
+    lda t_str_ptr1
+    bne @skip
+    dec t_str_ptr1+1
+@skip:
+    dec t_str_ptr1
+    rts
+
+inc_str_ptr1:
+    inc t_str_ptr1
+    bne @skip
+    inc t_str_ptr1+1
+@skip:
+    rts
+
+inc_str_ptr2:
+    inc t_str_ptr2
+    bne @skip
+    inc t_str_ptr2+1
+@skip:
+    rts
+
+; Helper: Move t_str_ptr1 to beginning of current line
+move_to_bol:
+    lda t_str_ptr1
+    sta t_ptr_temp
+    lda t_str_ptr1+1
+    sta t_ptr_temp+1
+@scan:
+    lda t_ptr_temp
+    cmp #<text_buffer_fixed
+    bne @check
+    lda t_ptr_temp+1
+    cmp #>text_buffer_fixed
+    beq @at_start
+@check:
+    ; Back up one
+    lda t_ptr_temp
+    bne @dec
+    dec t_ptr_temp+1
+@dec:
+    dec t_ptr_temp
+    
+    ldy #0
+    lda (t_ptr_temp), y
+    cmp #$0A
+    beq @found_nl
+    cmp #$0D
+    beq @found_nl
+    jmp @scan
+@found_nl:
+    ; Forward one to get to start of line
+    inc t_ptr_temp
+    bne @at_start
+    inc t_ptr_temp+1
+@at_start:
+    lda t_ptr_temp
+    sta t_str_ptr1
+    lda t_ptr_temp+1
+    sta t_str_ptr1+1
+    rts
+
+handle_bs:
+    ; Non-destructive backspace: move cursor left, then delete char under it.
+    ; First, check if we are at the start of the buffer.
+    lda t_str_ptr1
+    cmp #<text_buffer_fixed
+    bne @proceed
+    lda t_str_ptr1+1
+    cmp #>text_buffer_fixed
+    beq @done ; At start, do nothing
+
+@proceed:
+    jsr dec_str_ptr1
+    lda #<ansi_left
+    ldy #>ansi_left
+    jsr print_str_ay
+    
+    jmp handle_del_char ; handle_del_char does a full redraw, which is fine.
+@done:
+    jmp loop_continue
+
+;---------------------------------------------------------------------------
+; handle_del_char: Deletes the character at the current cursor position
+; by shifting the remainder of the text buffer one byte to the left.
+;---------------------------------------------------------------------------
+handle_del_char:
+    ; 1. Check if we are at the end of the text (cursor is on the null terminator).
+    ;    If so, there is nothing to delete.
+    ldy #0
+    lda (t_str_ptr1), y
+    beq @del_done ; Nothing to delete, just return to loop
+
+    ; 2. Shift buffer contents left by one, starting from the cursor position.
+    ;    DST = t_ptr_temp (set to current cursor position)
+    ;    SRC = t_str_ptr2 (set to one position after cursor)
+    lda t_str_ptr1
+    sta t_ptr_temp
+    sta t_str_ptr2
+    lda t_str_ptr1+1
+    sta t_ptr_temp+1
+    sta t_str_ptr2+1
+    inc t_str_ptr2
+    bne @no_inc_hi
+    inc t_str_ptr2+1
+@no_inc_hi:
+
+@shift_loop:
+    ldy #0
+    lda (t_str_ptr2), y ; Load char from source
+    sta (t_ptr_temp), y ; Store it at destination
+
+    ; If we just moved the null terminator, the shift is complete.
+    beq @shift_done
+
+    ; Increment pointers and continue shifting.
+    inc t_ptr_temp
+    bne @no_inc_dst
+    inc t_ptr_temp+1
+@no_inc_dst:
+    inc t_str_ptr2
+    bne @no_inc_src
+    inc t_str_ptr2+1
+@no_inc_src:
+    jmp @shift_loop
+
+@shift_done:
+    jsr redraw_screen
+@del_done:
+    jmp loop_continue
 
 handle_enter:
-    lda #$0D  ; Carriage Return
-    jsr OUTCH ; Echo CR
+    lda #$0A             ; Line Feed
+    jsr insert_char_mem  ; Insert LF into the memory buffer
     
-    lda #$0A  ; Line Feed
-    jsr store_char  ; Store LF in file
-    jsr OUTCH ; Echo LF
+    ; For newlines, a full redraw is necessary because all subsequent
+    ; lines on the screen are shifted down.
+    jsr redraw_screen
     
+    jmp loop_continue
+
+loop_continue:
+    jsr update_status_bar
     jmp editor_loop
 
-store_char:
-    ; Store character at current buffer position
+; ---------------------------------------------------------------------------
+; insert_and_redraw_char: Inserts char in A and redraws the current line
+; ---------------------------------------------------------------------------
+insert_and_redraw_char:
+    jsr insert_char_mem ; Inserts char from A and advances t_str_ptr1
+    
+    ; After insertion, the internal pointer is one position ahead of the
+    ; visual cursor. We need to back it up to redraw from the right spot.
+    jsr dec_str_ptr1
+    
+    ; Redraw the line from the current cursor position
+    jsr redraw_line_from_cursor
+    
+    ; Now, advance the internal pointer and the visual cursor to match.
+    jsr inc_str_ptr1
+    lda #<ansi_right
+    ldy #>ansi_right
+    jsr print_str_ay
+    rts
+
+; ---------------------------------------------------------------------------
+; insert_char_mem: Shifts buffer and inserts character in A
+; ---------------------------------------------------------------------------
+insert_char_mem:
+    pha ; Save char to insert (from A)
+    
+    ; 1. Find end of buffer (null terminator)
+    lda #<text_buffer_fixed
+    sta t_ptr_temp ; Use t_ptr_temp to scan
+    lda #>text_buffer_fixed
+    sta t_ptr_temp+1
+@find_end:
+    ldy #0
+    lda (t_ptr_temp), y
+    beq @found_end
+    inc t_ptr_temp
+    bne @find_end
+    inc t_ptr_temp+1
+    jmp @find_end
+@found_end:
+    ; t_ptr_temp now points to the null terminator.
+    
+    ; 2. Shift buffer contents right by one, starting from the end.
+@shift_loop:
+    ; Check if our destination pointer (t_ptr_temp) has reached the cursor.
+    lda t_ptr_temp
+    cmp t_str_ptr1
+    bne @do_shift
+    lda t_ptr_temp+1
+    cmp t_str_ptr1+1
+    beq @shift_done
+
+@do_shift:
+    ; Get char from t_ptr_temp-1 and store it at t_ptr_temp
+    ; First, back up t_ptr_temp
+    lda t_ptr_temp
+    bne @dec_lo
+    dec t_ptr_temp+1
+@dec_lo:
+    dec t_ptr_temp
+    
+    ; Now copy
+    ldy #0
+    lda (t_ptr_temp), y
+    iny
+    sta (t_ptr_temp), y
+    
+    ; Go back to start of loop to check position again
+    jmp @shift_loop
+
+@shift_done:
+    ; 3. Store new character at cursor position
+    pla
     ldy #0
     sta (t_str_ptr1), y
-       
-    ; Increment pointer
+    
+    ; 4. Increment cursor
     inc t_str_ptr1
     bne @ret
     inc t_str_ptr1+1
     
-    ; Check for buffer overflow (optional)
-    lda t_str_ptr1+1
-    cmp #>(text_buffer_fixed + TEXT_BUFFER_SIZE)
-    bcc @ret
-    lda t_str_ptr1
-    cmp #<(text_buffer_fixed + TEXT_BUFFER_SIZE)
-    bcc @ret
-    
-    ; Buffer full - beep or indicator
-    lda #$07  ; BEL character
-    jsr OUTCH
-    ; Don't increment if buffer full
-    dec t_str_ptr1
-    bne @ret
-    dec t_str_ptr1+1
-    
 @ret:
     rts
 
+; ---------------------------------------------------------------------------
+; redraw_line_from_cursor: Redraws the current line without a full redraw
+; ---------------------------------------------------------------------------
+redraw_line_from_cursor:
+    ; Assumes visual cursor is already at the correct position.
+    ; Saves cursor, clears to EOL, prints rest of line, restores cursor.
+    lda #<ansi_save
+    ldy #>ansi_save
+    jsr print_str_ay
+
+    lda #<ansi_clear_line
+    ldy #>ansi_clear_line
+    jsr print_str_ay
+
+    ; Use t_str_ptr2 as a temporary printing pointer
+    lda t_str_ptr1
+    sta t_str_ptr2
+    lda t_str_ptr1+1
+    sta t_str_ptr2+1
+
+@print_loop:
+    ldy #0
+    lda (t_str_ptr2), y
+    beq @done_print ; End of buffer
+    cmp #$0A
+    beq @done_print ; End of line
+    
+    jsr OUTCH
+    jsr inc_str_ptr2
+    jmp @print_loop
+
+@done_print:
+    lda #<ansi_restore
+    ldy #>ansi_restore
+    jsr print_str_ay
+    rts
+
 exit_check:
-    jsr CRLF
+    ; Move to a safe line (23) at bottom of screen for prompt
+    lda #<ansi_line23
+    ldy #>ansi_line23
+    jsr print_str_ay
+
+    ; Clear the line to prevent artifacts
+    lda #<ansi_clear_line
+    ldy #>ansi_clear_line
+    jsr print_str_ay
+
     lda #<save_prompt
     ldy #>save_prompt
     jsr print_str_ay
@@ -288,8 +797,7 @@ save_sequence:
     cmp #$20
     bcc @read_fname  ; Ignore other controls
     sta filename_buf, y
-    ; REMOVE THIS ECHO - it's causing double printing
-    ; jsr OUTCH  ; Echo
+    jsr OUTCH  ; Echo
     iny
     cpy #126
     bcc @read_fname
@@ -409,6 +917,13 @@ init_ui:
     ldy #>header_msg
     jsr print_str_ay
     
+    ; Print footer right after header
+    jsr CRLF
+    lda #<footer_msg
+    ldy #>footer_msg
+    jsr print_str_ay
+    jsr CRLF
+    
     lda filename_buf
     bne @has_filename
     
@@ -429,11 +944,6 @@ init_ui:
     ldy #>separator_msg
     jsr print_str_ay
     jsr CRLF
-    
-    lda #<footer_msg
-    ldy #>footer_msg
-    jsr print_str_ay
-    jsr CRLF
     rts
 
 ; ---------------------------------------------------------------------------
@@ -444,7 +954,33 @@ perform_save:
     lda VIA_DDRA
     pha
     
-    ; 1. Construct Path in ARG_BUFF
+    ; 1. Calculate Length by scanning for null terminator
+    lda #<text_buffer_fixed
+    sta t_str_ptr2
+    lda #>text_buffer_fixed
+    sta t_str_ptr2+1
+    
+    lda #0
+    sta file_length_lo
+    sta file_length_hi
+    
+@calc_len_loop:
+    ldy #0
+    lda (t_str_ptr2), y
+    beq @len_done
+    
+    inc file_length_lo
+    bne @no_inc_len_hi
+    inc file_length_hi
+@no_inc_len_hi:
+    
+    inc t_str_ptr2
+    bne @calc_len_loop
+    inc t_str_ptr2+1
+    jmp @calc_len_loop
+    
+@len_done:
+    ; 2. Construct Path in ARG_BUFF
     lda filename_buf
     cmp #'/'
     beq @abs_path
@@ -502,15 +1038,6 @@ perform_save:
     lda #0
     sta ARG_BUFF, x
     inx
-    
-    ; 2. Calculate Length
-    sec
-    lda t_str_ptr1
-    sbc #<text_buffer_fixed
-    sta file_length_lo
-    lda t_str_ptr1+1
-    sbc #>text_buffer_fixed
-    sta file_length_hi
     
     ; Append Length
     lda file_length_lo
@@ -611,12 +1138,13 @@ perform_save:
     lda #$00
     sta VIA_DDRA
     
-    jsr read_byte
-    pha
-    jsr read_byte
-    jsr read_byte
-    pla
+    ; Read status, discard length bytes, then check status
+    jsr read_byte      ; Read status byte
+    sta LAST_STATUS    ; Store it safely
+    jsr read_byte      ; Read and discard len_lo
+    jsr read_byte      ; Read and discard len_hi
     
+    lda LAST_STATUS
     cmp #STATUS_OK
     bne @final_err
     
@@ -639,6 +1167,94 @@ perform_save:
     rts
 
 ; ---------------------------------------------------------------------------
+; Redraw Screen - Clears and reprints the entire UI and text buffer
+; ---------------------------------------------------------------------------
+redraw_screen:
+    ; 1. Clear screen and reset cursor to home
+    lda #<ansi_cls
+    ldy #>ansi_cls
+    jsr print_str_ay
+
+    ; 2. Redraw UI header
+    lda #<header_msg
+    ldy #>header_msg
+    jsr print_str_ay
+    
+    ; Print footer right after header
+    jsr CRLF
+    lda #<footer_msg
+    ldy #>footer_msg
+    jsr print_str_ay
+    jsr CRLF
+    
+    lda filename_buf
+    bne @redraw_has_filename
+    lda #<no_file_msg
+    ldy #>no_file_msg
+    jsr print_str_ay
+    jmp @redraw_continue
+@redraw_has_filename:
+    lda #<filename_buf
+    ldy #>filename_buf
+    jsr print_str_ay
+@redraw_continue:
+    jsr CRLF
+    lda #<separator_msg
+    ldy #>separator_msg
+    jsr print_str_ay
+    jsr CRLF
+
+    ; 3. Print the current text buffer content
+    lda #<text_buffer_fixed
+    sta t_ptr_temp
+    lda #>text_buffer_fixed
+    sta t_ptr_temp+1
+@print_loop:
+    ; Check if we are at the cursor position
+    lda t_ptr_temp
+    cmp t_str_ptr1
+    bne @check_char
+    lda t_ptr_temp+1
+    cmp t_str_ptr1+1
+    bne @check_char
+
+    ; Save cursor position
+    lda #<ansi_save
+    ldy #>ansi_save
+    jsr print_str_ay
+
+@check_char:
+    ldy #0
+    lda (t_ptr_temp), y
+    beq @print_done
+    jsr OUTCH
+    inc t_ptr_temp
+    bne @print_loop
+    inc t_ptr_temp+1
+    jmp @print_loop
+
+@print_done:
+    ; Check if cursor is at the very end (null terminator)
+    lda t_ptr_temp
+    cmp t_str_ptr1
+    bne @draw_footer
+    lda t_ptr_temp+1
+    cmp t_str_ptr1+1
+    bne @draw_footer
+    
+    ; Save cursor position (at end of file)
+    lda #<ansi_save
+    ldy #>ansi_save
+    jsr print_str_ay
+
+@draw_footer:
+    ; Restore cursor position
+    lda #<ansi_restore
+    ldy #>ansi_restore
+    jsr print_str_ay
+    jsr update_status_bar
+    rts
+; ---------------------------------------------------------------------------
 ; Helper: Print String
 ; ---------------------------------------------------------------------------
 print_str_ay:
@@ -655,15 +1271,186 @@ print_str_ay:
     rts
 
 ; ---------------------------------------------------------------------------
+; Update Status Bar (Line 2) with Line/Col
+; ---------------------------------------------------------------------------
+update_status_bar:
+    ; Save cursor
+    lda #<ansi_save
+    ldy #>ansi_save
+    jsr print_str_ay
+    
+    ; Move to Line 2
+    lda #<ansi_line2
+    ldy #>ansi_line2
+    jsr print_str_ay
+    
+    ; Print Footer Msg
+    lda #<footer_msg
+    ldy #>footer_msg
+    jsr print_str_ay
+    
+    ; Move to Col 50
+    lda #<ansi_col50
+    ldy #>ansi_col50
+    jsr print_str_ay
+    
+    ; Clear rest of line
+    lda #<ansi_clear_line
+    ldy #>ansi_clear_line
+    jsr print_str_ay
+    
+    ; Calc and Print Line/Col
+    jsr calc_line_col
+    
+    lda #<msg_line
+    ldy #>msg_line
+    jsr print_str_ay
+    
+    lda current_line
+    jsr print_dec_8
+    
+    lda #<msg_col
+    ldy #>msg_col
+    jsr print_str_ay
+    
+    lda current_col
+    jsr print_dec_8
+    
+    ; Restore cursor
+    lda #<ansi_restore
+    ldy #>ansi_restore
+    jsr print_str_ay
+    rts
+
+calc_line_col:
+    lda #1
+    sta current_line
+    sta current_col
+    
+    lda #<text_buffer_fixed
+    sta t_ptr_temp
+    lda #>text_buffer_fixed
+    sta t_ptr_temp+1
+    
+@scan_loop:
+    ; Check if we reached cursor
+    lda t_ptr_temp
+    cmp t_str_ptr1
+    bne @check_char
+    lda t_ptr_temp+1
+    cmp t_str_ptr1+1
+    beq @done
+    
+@check_char:
+    ldy #0
+    lda (t_ptr_temp), y
+    cmp #$0A ; LF
+    bne @not_lf
+    inc current_line
+    lda #1
+    sta current_col
+    jmp @next
+@not_lf:
+    inc current_col
+@next:
+    inc t_ptr_temp
+    bne @scan_loop
+    inc t_ptr_temp+1
+    jmp @scan_loop
+@done:
+    rts
+
+print_dec_8:
+    ; Print A as decimal (0-255)
+    ; Uses t_arg_ptr ($58) as temp to avoid stack usage completely
+    sta t_arg_ptr
+    
+    ldy #0 ; Hundreds flag
+    ldx #0 ; Hundreds counter
+@div100:
+    lda t_arg_ptr
+    cmp #100
+    bcc @print_100
+    sbc #100
+    sta t_arg_ptr
+    inx
+    jmp @div100
+@print_100:
+    cpx #0
+    beq @skip_100
+    txa
+    ora #'0'
+    jsr OUTCH
+    ldy #1
+@skip_100:
+    
+    ldx #0 ; Tens counter
+@div10:
+    lda t_arg_ptr
+    cmp #10
+    bcc @print_10
+    sbc #10
+    sta t_arg_ptr
+    inx
+    jmp @div10
+@print_10:
+    ; Check if we should print tens
+    cpy #1 ; Did we print hundreds?
+    beq @do_print_10
+    cpx #0 ; Is tens > 0?
+    bne @do_print_10
+    jmp @print_1
+@do_print_10:
+    txa
+    ora #'0'
+    jsr OUTCH
+    
+@print_1:
+    lda t_arg_ptr
+    ora #'0'
+    jsr OUTCH
+    rts
+
+; ---------------------------------------------------------------------------
+; Local System Call Implementations
+; ---------------------------------------------------------------------------
+CHRIN:
+    lda ACIA_DATA
+    beq @no_key
+    sec
+    rts
+@no_key:
+    clc
+    rts
+
+CRLF:
+    lda #$0D
+    jsr OUTCH
+    lda #$0A
+    jmp OUTCH
+
+; ---------------------------------------------------------------------------
 ; RODATA
 ; ---------------------------------------------------------------------------
 .segment "RODATA"
 
 ansi_cls:        .byte $1B, "[2J", $1B, "[H", 0
+ansi_line23:     .byte $1B, "[23;1H", 0
+ansi_line2:      .byte $1B, "[2;1H", 0
+ansi_col50:      .byte $1B, "[50G", 0
+ansi_clear_line: .byte $1B, "[K", 0
+ansi_left:       .byte $1B, "[D", 0
+ansi_right:      .byte $1B, "[C", 0
+ansi_up:         .byte $1B, "[A", 0
+ansi_down:       .byte $1B, "[B", 0
+ansi_save:       .byte $1B, "[s", 0
+ansi_restore:    .byte $1B, "[u", 0
 header_msg:      .asciiz "WRITE - Nano-like Editor "
 no_file_msg:     .asciiz "[No File]"
-separator_msg:   .asciiz "------------------------"
-footer_msg:      .asciiz "^X Exit"
+separator_msg:   .asciiz "--------------------------------------------------------------------------------"
+footer_msg:      .asciiz "^X Exit | Arrow Keys | BACKSPACE DEL | DEL |"
+msg_line:        .asciiz " Line: "
+msg_col:         .asciiz " Col: "
 save_prompt:     .asciiz "Save modified buffer? (Y/N) "
 filename_prompt: .asciiz "Filename: "
 msg_saving:      .asciiz "Saving..."
@@ -677,6 +1464,8 @@ stream_start_msg: .asciiz "Sending data: "
 .segment "BSS"
 
 ; Control variables
+current_line:      .res 1
+current_col:       .res 1
 cwd_ptr:           .res 2
 file_length_lo:    .res 1
 file_length_hi:    .res 1
