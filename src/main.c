@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <string.h>
+#include <stdlib.h>
 #include "pico/stdlib.h"
 #include "bus.h"
 #include "cmd_defs.h"
@@ -137,6 +138,14 @@ static void ntp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip
     pbuf_free(p);
 }
 
+// --- DATE/TIME HELPERS ---
+// Calculate Day of Week (0=Sunday) for a given date
+int calc_dotw(int y, int m, int d) {
+    static int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    y -= m < 3;
+    return (y + y/4 - y/100 + y/400 + t[m-1] + d) % 7;
+}
+
 int main() {
     stdio_init_all();
     sleep_ms(2000);
@@ -165,6 +174,15 @@ int main() {
     
     // Buffers for Response
     uint8_t resp_buf[1024]; // Large enough for a directory listing
+
+    // --- Auto-mount Filesystem on Boot ---
+    int boot_mount_err = lfs_mount(&lfs, &w25q_cfg);
+    if (boot_mount_err == 0) {
+        fs_mounted = true;
+        printf("LittleFS: Auto-mounted successfully\n");
+    } else {
+        printf("LittleFS: Auto-mount failed (%d)\n", boot_mount_err);
+    }
 
     while (1) {
         cyw43_arch_poll(); // Essential for Wi-Fi background operations
@@ -341,6 +359,53 @@ int main() {
                 }
                 break;
 
+            case CMD_SYS_SET_TIME:
+                {
+                    // Args: "YYYY-MM-DD HH:MM:SS"
+                    // Manual parsing to avoid sscanf issues
+                    char *p = (char *)arg_buf;
+                    int year = strtol(p, &p, 10);
+                    if (*p != '-') { resp_buf[0] = STATUS_ERR; payload_len=0; break; } p++;
+                    int month = strtol(p, &p, 10);
+                    if (*p != '-') { resp_buf[0] = STATUS_ERR; payload_len=0; break; } p++;
+                    int day = strtol(p, &p, 10);
+                    if (*p != ' ') { resp_buf[0] = STATUS_ERR; payload_len=0; break; } p++;
+                    int hour = strtol(p, &p, 10);
+                    if (*p != ':') { resp_buf[0] = STATUS_ERR; payload_len=0; break; } p++;
+                    int min = strtol(p, &p, 10);
+                    if (*p != ':') { resp_buf[0] = STATUS_ERR; payload_len=0; break; } p++;
+                    int sec = strtol(p, &p, 10);
+
+                    datetime_t t = {
+                        .year  = (int16_t)year, .month = (int8_t)month, .day   = (int8_t)day,
+                        .dotw  = (int8_t)calc_dotw(year, month, day),
+                        .hour  = (int8_t)hour,  .min   = (int8_t)min,   .sec   = (int8_t)sec
+                    };
+                    
+                    if (rtc_set_datetime(&t)) {
+                        resp_buf[0] = STATUS_OK;
+                    } else {
+                        resp_buf[0] = STATUS_ERR; // Invalid datetime
+                    }
+                    payload_len = 0;
+                }
+                break;
+
+            case CMD_SYS_GET_TIME:
+                {
+                    datetime_t t;
+                    if (rtc_get_datetime(&t)) {
+                        int len = snprintf((char*)payload_ptr, 64, "%04d-%02d-%02d %02d:%02d:%02d",
+                            t.year, t.month, t.day, t.hour, t.min, t.sec);
+                        resp_buf[0] = STATUS_OK;
+                        payload_len = len;
+                    } else {
+                        resp_buf[0] = STATUS_ERR; // RTC not running
+                        payload_len = 0;
+                    }
+                }
+                break;
+
             case CMD_RESET:
                 // Enable the watchdog, then wait for it to timeout and reset the device
                 watchdog_enable(1, 1); // Timeout after 1ms, pause on debug
@@ -350,6 +415,12 @@ int main() {
 
             case CMD_FS_MOUNT:
                 {
+                    if (fs_mounted) {
+                        resp_buf[0] = STATUS_OK;
+                        payload_len = 0;
+                        break;
+                    }
+
                     int err = lfs_mount(&lfs, &w25q_cfg);
                     if (err != 0) {
                         printf("LittleFS: Mount failed (%d). Attempting format...\n", err);
@@ -1067,8 +1138,12 @@ int main() {
 
             case CMD_NET_TIME:
                 {
-                    // Args: None
+                    // Args: [OffsetStr] (optional) e.g. "-5"
                     // Returns: "YYYY-MM-DD HH:MM:SS"
+                    int offset = 0;
+                    if (arg_len > 0) {
+                        offset = atoi((char*)arg_buf);
+                    }
                     
                     struct udp_pcb *pcb = udp_new();
                     ntp_req_t req = {0};
@@ -1098,6 +1173,9 @@ int main() {
                     
                     if (req.complete) {
                         time_t rawtime = (time_t)req.timestamp;
+                        // Apply timezone offset (in hours)
+                        rawtime += offset * 3600;
+
                         struct tm *ptm = gmtime(&rawtime);
                         if (ptm) {
                             // Sync Pico RTC
@@ -1121,6 +1199,7 @@ int main() {
                         }
                     } else {
                         // Timeout or DNS error
+                        printf("NTP: Request failed (Timeout/DNS)\n");
                         resp_buf[0] = STATUS_ERR;
                         payload_len = 0;
                     }

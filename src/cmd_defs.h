@@ -5,6 +5,8 @@
 #define CMD_PING        0x01  // Args: None. Returns: "PONG"
 #define CMD_GET_VERSION 0x02  // Args: None. Returns: Version String
 #define CMD_SYS_STATUS  0x03  // Args: None. Returns: Status String
+#define CMD_SYS_SET_TIME 0x04 // Args: "YYYY-MM-DD HH:MM:SS"
+#define CMD_SYS_GET_TIME 0x05 // Args: None. Returns: Time String
 #define CMD_RESET       0x0F  // Args: None. Resets Pico
 
 // --- FILESYSTEM COMMANDS (0x10 - 0x2F) ---

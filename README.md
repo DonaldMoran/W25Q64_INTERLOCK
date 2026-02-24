@@ -63,6 +63,11 @@ The 65C02 computer issues commands, which are transmitted through the 6522 VIA t
 | `RUN [FILE]` | | Load and execute binary (requires 2-byte header) |
 | `COPY [SRC] [DST]` | `CP` | Copy file |
 | `TOUCH [FILE]` | | Create empty file |
+| `JUMP [ADDR]` | | Jump to address (e.g. FF00 for WozMon) |
+| `DATE [ARGS]` | | Get/Set System Time (NTP supported) (External) |
+| `ECHO [TEXT]` | | Print text to screen (External) |
+| `DO [FILE]` | | Execute batch script (External) |
+| `WRITE [FILE]` | | Text Editor (External) |
 | `BENCH` | | Run filesystem benchmark (External) |
 | `SETSERVER [IP:PORT]` | | Set/Get file server address (External) |
 | `GET [REMOTE] [LOCAL]` | | Download file via HTTP (External) |
@@ -677,12 +682,6 @@ Done
 ## 16. Future Ideas (Post-Network Access)
 
 ```text
-WRITE [PATH]
-Create or append to text files
-
-Multi-line input mode
-
-Relative path support
 
 Exit via Ctrl+Z or Ctrl+X
 ```
@@ -712,49 +711,170 @@ Includes build instructions and testing workflow
 
 Maintains the future ideas section
 
-```markdown
-## 18. Changelog (On branch feature/transient-3)
+### Major System Updates
 
-### Feature: Transient Text Editor (WRITE)
+- **ROM Integration:** The shell has been moved to ROM at `$E000`, freeing up RAM for transient programs.
+- **Auto-Mount:** Filesystem now mounts automatically on boot.
 
-A new transient command `WRITE` has been implemented, providing a Nano-like text editing experience on the 6502 system.
+### Applications Section
+
+- A new transient command `WRITE` has been implemented, providing a Nano-like text editing experience on the 6502 system.
 
 **Key Features:**
-*   **User Interface:** Full-screen editor with a header displaying the filename and a footer showing command shortcuts.
-*   **Input Handling:**
-    *   Supports standard alphanumeric input.
-    *   Handles `Enter` for newlines and `Tab` for spacing.
-    *   **Backspace:** Implemented visual and buffer-level character deletion.
-    *   **Arrow Keys:** Escape sequence detection is in place to gracefully handle cursor keys.
-*   **File Management:**
-    *   **Launch with Filename:** `WRITE <filename>` opens the editor with the target file pre-set.
-    *   **Launch Empty:** `WRITE` opens a blank buffer.
-    *   **Save & Exit:** Triggered via `Ctrl+X`.
-    *   **Smart Prompting:** If a filename was not provided at launch, the editor prompts the user to enter one upon saving.
-*   **Architecture:**
-    *   Operates as a transient command loaded at `$0800`.
-    *   Utilizes a 4KB fixed memory buffer for text storage.
-    *   Integrates with the shell's Current Working Directory (CWD) for relative path resolution.
-    *   Implements robust stack management to prevent corruption during execution.
 
-**Previous Features (feature/transient-2):**
+- **User Interface:** Full-screen editor with a header displaying the filename and a footer showing command shortcuts.
+- **Input Handling:**
+  - Supports standard alphanumeric input.
+  - Handles `Enter` for newlines and `Tab` for spacing.
+  - **Backspace:** Implemented visual and buffer-level character deletion.
+  - **Arrow Keys:** Escape sequence detection is in place to gracefully handle cursor keys.
+- **File Management:**
+  - **Launch with Filename:** `WRITE <filename>` opens the editor with the target file pre-set.
+  - **Launch Empty:** `WRITE` opens a blank buffer.
+  - **Save & Exit:** Triggered via `Ctrl+X`.
+  - **Smart Prompting:** If a filename was not provided at launch, the editor prompts the user to enter one upon saving.
+- **Architecture:**
+  - Operates as a transient command loaded at `$0800`.
+  - Utilizes a 4KB fixed memory buffer for text storage.
+  - Integrates with the shell's Current Working Directory (CWD) for relative path resolution.
+  - Implements robust stack management to prevent corruption during execution.
 
-The following features were implemented on the `feature/transient-2` branch, building upon the transient command architecture established in `feature/transient-1`:
+## 18. Development Workflow (RAM Testing)
 
-1.  **Shell Enhancements**:
-    -   **Smart Execution Path**: The shell now searches for external commands in the **Current Working Directory** first, then falls back to `/BIN/`. This allows executing local binaries immediately.
-    -   **Global Pagination**: Implemented a `--More--` prompt for commands with long output (`DIR`, `TYPE`, `HELP`, `PWD`). The output pauses every 22 lines and waits for a keypress.
-    -   **Relative Path Support**: The shell now passes the Current Working Directory to transient commands via Zero Page ($5E/$5F), enabling them to resolve relative paths.
-    -   **Robustness & Fixes**:
-        -   Fixed a critical bug in `SAVEMEM` where the "Saving..." message overwrote the data pointer.
-        -   Added safety checks to `TYPE` to prevent reading directories as files.
-        -   Improved `try_external` logic to correctly handle argument shifting and ensure absolute paths are passed to the Pico.
+To test changes to the shell without burning a new ROM:
 
-2.  **Transient Command Updates**:
-    -   **GET / PUT**: Updated to utilize the CWD pointer. Users can now use relative paths for local files (e.g., `GET file.txt` saves to the current directory).
-    -   **Global Configuration**: Network commands now explicitly look for `/server.cfg` in the root directory, ensuring they function correctly from any subdirectory.
+1. **Build the RAM Shell:**
 
-3.  **Previous Features (feature/transient-1)**:
-    -   Transient Command Architecture (`/BIN` execution).
-    -   Network Commands (`SETSERVER`, `GET`, `PUT`, `NETPING`).
+    ```bash
+    cd 6502/ca65
+    make
+    ```
 
+    This creates `bin/cmd_shell.bin`.
+
+2. **Upload to Pico:**
+    Copy `bin/cmd_shell.bin` to the Pico filesystem (e.g., as `NEWSHELL.BIN`).
+
+3. **Load and Run:**
+    From the existing ROM shell on the 6502:
+
+    ```text
+    LOADMEM 1000 NEWSHELL.BIN
+    JUMP 1000
+    ```
+
+    You are now running the new shell from RAM.
+
+## 19. Build System & File Reference
+
+### Build Configuration Files
+
+| File | Purpose |
+| ---- | ------- |
+| `6502/ca65/Makefile` | **Master Makefile** for RAM development. Builds shell and commands. |
+| `6502/ca65/common/ram.cfg` | Linker config for the **RAM Shell** (Loads at `$1000`). |
+| `6502/ca65/commands/Makefile` | Makefile for **Transient Commands**. |
+| `6502/ca65/commands/transient.cfg` | Linker config for **Transient Commands** (Loads at `$0800`). |
+
+### Core Source Files
+
+| File | Purpose |
+| ---- | ------- |
+| `6502/ca65/shell/cmd_shell.s` | **Master Shell Source**. Used for both RAM and ROM builds. |
+| `6502/ca65/common/pico_lib.s` | **Hardware Driver**. Handles VIA/Pico communication. |
+| `6502/ca65/common/pico_def.inc` | **Global Definitions**. Constants, Command IDs, Status Codes. |
+
+### Legacy Files
+
+| File | Status |
+| ---- | ------ |
+| `6502/ca65/commands/transient.inc` | **Deprecated**. Replaced by `pico_def.inc` and `pico_lib.s`. Do not use for new commands. |
+
+## 20. Building the Pico Firmware
+
+This project involves two Raspberry Pi Picos:
+
+1. **Bridge Pico (Pico W):** The smart peripheral handling filesystem, network, and 6502 bus interface.
+2. **Host Pico (Standard Pico):** Emulates the 6502 system (if not using real hardware).
+
+### 20.1 Bridge Pico (Pico W)
+
+**Source Location:** `src/` (Root of repository)
+
+**Configuration:**
+Before building, open `src/main.c` and configure your network settings:
+
+```c
+#define WIFI_SSID "YOUR_SSID"
+#define WIFI_PASSWORD "YOUR_WIFI_PASS"
+#define FILE_SERVER_IP "192.168.1.100" // IP of your PC running file_server.py
+```
+
+**Build Steps:**
+
+1. Ensure the **Pico SDK** is installed and the `PICO_SDK_PATH` environment variable is set.
+2. Create a build directory:
+
+    ```bash
+    mkdir build
+    cd build
+    ```
+
+3. Run CMake:
+
+    ```bash
+    cmake ..
+    ```
+
+4. Compile:
+
+    ```bash
+    make
+    ```
+
+5. **Flash:** Hold the BOOTSEL button on your Pico W, connect it to USB, and copy the generated `W25Q64_INTERLOCK.uf2` file to the `RPI-RP2` drive.
+
+### 20.2 Host Pico (6502 Emulator)
+
+**Source Location:** `emmulator/EMULATOR/`
+
+**Build Steps:**
+
+1. Navigate to the emulator directory:
+
+    ```bash
+    cd emmulator/EMULATOR
+    ```
+
+2. Create a build directory:
+
+    ```bash
+    mkdir build
+    cd build
+    ```
+
+3. Run CMake:
+
+    ```bash
+    cmake ..
+    ```
+
+4. Compile:
+
+    ```bash
+    make
+    ```
+
+5. **Flash:** Hold the BOOTSEL button on your standard Pico, connect it to USB, and copy the generated `.uf2` file to the `RPI-RP2` drive.
+
+### Last commit branch feature/transient-6
+
+- **Command List:**
+
+  - Added ECHO and DO to the command table.
+
+- **Changelog:**
+
+- Added a new section for **feature/transient-6** detailing:
+  - Batch Scripting: **DO**, **AUTOEXEC.BAT**, **ECHO**
+  - Editor Improvements: **Insert Mode**, **Navigation**

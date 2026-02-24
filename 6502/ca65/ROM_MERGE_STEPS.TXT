@@ -1,0 +1,77 @@
+# ROM Merge & Development Workflow
+
+## 1. Directory Structure Strategy
+
+We separate the "Source of Truth" (Development) from the "Deployment" (ROM Build).
+
+### Master Development Area (6502/ca65/)
+This is where you edit code.
+
+6502/ca65/
+├── shell/
+│   └── cmd_shell.s         <-- MASTER Shell Source
+├── common/
+│   ├── pico_lib.s          <-- MASTER Library Source
+│   ├── pico_def.inc        <-- MASTER Definitions
+│   └── ram.cfg             <-- Linker config for RAM testing (maps DDOS segment to $1000)
+├── commands/               <-- Transient Commands (Run in RAM)
+│   ├── write/              <-- Editor
+│   │   └── write.s
+│   ├── date/               <-- Future DATE command
+│   │   └── date.s
+│   └── transient.cfg       <-- Standard config for transients (Load @ $0800)
+└── Makefile                <-- Builds RAM shell and commands
+
+### ROM Deployment Area (emmulator/...)
+This is where we build the final ROM image. Files here are COPIES.
+
+emmulator/EATERSD10/four-bit-mode-msbasic/
+├── cmd_shell.s             <-- COPY of shell
+├── common/                 <-- COPY of common files
+│   ├── pico_lib.s
+│   └── pico_def.inc
+├── bios.s                  <-- Main ROM assembly (includes cmd_shell.s)
+├── eater.cfg               <-- ROM Linker config (maps DDOS segment to $E000)
+└── doit.sh                 <-- ROM Build script
+
+---
+
+## 2. Development Cycle
+
+### Phase A: Develop & Test in RAM (Fast Iteration)
+1.  **Edit** `6502/ca65/shell/cmd_shell.s`.
+2.  **Build** the RAM version:
+    `cd 6502/ca65 && make`
+3.  **Upload** `shell/cmd_shell.bin` to the Pico (e.g., as `NEWSHELL.BIN`).
+4.  **Test** on hardware without burning ROM:
+    *   From the existing ROM shell: `LOADMEM 1000 NEWSHELL.BIN`
+    *   Start it: `JUMP 1000`
+    *   *Note: The RAM shell will run at $1000, while the ROM shell sits dormant at $E000.*
+
+### Phase B: Merge to ROM (Stable Release)
+Once the shell code is stable in RAM:
+1.  **Copy** the source files to the ROM directory:
+    `cp 6502/ca65/shell/cmd_shell.s emmulator/EATERSD10/four-bit-mode-msbasic/`
+    `cp -r 6502/ca65/common/* emmulator/EATERSD10/four-bit-mode-msbasic/common/`
+2.  **Rebuild** the ROM:
+    `cd emmulator/EATERSD10`
+    `./doit.sh`
+3.  **Burn** the new ROM image.
+
+---
+
+## 3. Configuration & Compatibility
+
+To ensure `cmd_shell.s` works in both places without changes:
+
+1.  **Segments:** The source uses `.segment "DDOS"`.
+    *   In `eater.cfg` (ROM), map `DDOS` to `$E000`.
+    *   In `ram.cfg` (RAM), map `DDOS` to `$1000`.
+
+2.  **Labels:** The ROM has access to Krusader labels (like `RESET`), but the RAM build does not.
+    *   We added a compatibility block to `cmd_shell.s`:
+        ```ca65
+        .ifndef RESET
+          RESET = $FF00  ; Fallback for RAM build
+        .endif
+        ```
