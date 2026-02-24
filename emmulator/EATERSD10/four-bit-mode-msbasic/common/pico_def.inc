@@ -21,6 +21,8 @@ VIA_IER     = VIA_BASE + $0E
 CMD_SYS_PING    = $01
 CMD_SYS_VER     = $02
 CMD_SYS_STATUS  = $03
+CMD_SYS_SET_TIME = $04
+CMD_SYS_GET_TIME = $05
 CMD_SYS_RESET   = $0F
 
 CMD_FS_MOUNT    = $10
@@ -62,5 +64,9 @@ STATUS_ERR      = $FF
 STATUS_BUSY     = $01
 STATUS_NO_FILE  = $02
 STATUS_EXIST    = $03
+
+; --- Batch Processing ---
+BATCH_PTR       = $02FE ; 2 bytes: Pointer to current batch command char (0=Inactive)
+BATCH_BUFFER    = $3000 ; Start of batch script buffer in RAM
 
 .endif ; PICO_DEF_INC

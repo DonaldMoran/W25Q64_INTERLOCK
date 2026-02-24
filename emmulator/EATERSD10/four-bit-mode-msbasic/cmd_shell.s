@@ -1,14 +1,48 @@
 ; cmd_shell.s - 6502 Shell for Pico W Smart Peripheral
-; Target: RAM @ $1000
-; Target: ROM @ $E000 (DDOS Segment)
+; Target: RAM @ $1000 (Standalone) or ROM @ $E000 (Integrated)
 
 .include "common/pico_def.inc"
 
 .export DDOS_START
 
-; Compatibility: If RESET is not defined (e.g. RAM build), default to $FF00
+; ---------------------------------------------------------------------------
+; Conditional Configuration for Standalone (RAM) Build
+; ---------------------------------------------------------------------------
+; When building for RAM (e.g. via Makefile), system constants are not defined.
+; We detect this by checking if a standard symbol like CHRIN is undefined.
+.ifndef CHRIN
+    BUILD_RAM = 1
+    
+    ; System Constants (Matches EATER.LBL / BIOS)
+    MONCOUT      = $A23D
+    WOZMON       = $FF00
+    INPUT_BUFFER = $0300
+    OUTHEX       = $FFDC
+    PRHEX        = $FFE5
+    GETLINE      = $FF0E
+    OUTCH        = $FFEF
+    
+    ; Hardware Definitions for RAM build
+    ACIA_DATA    = $5000
+    
+    ; Map system calls to local implementations
+    CHRIN        = LOCAL_CHRIN
+    CRLF         = LOCAL_CRLF
+    
+    ; In RAM build, we link against pico_lib.o, so we must import these.
+    .import pico_init, pico_send_request, send_byte, read_byte
+    .import CMD_ID, ARG_LEN, ARG_BUFF, LAST_STATUS, RESP_LEN, RESP_BUFF
+    
+    ; Define RESET for do_exit
+    RESET        = WOZMON
+    
+    ; Entry point alias for RAM build (start label)
+    start = DDOS_START
+.endif
+
+; Compatibility: If RESET is not defined (e.g. ROM build without Krusader symbols visible yet), default to $FF00
 .ifndef RESET
-RESET = $FF00
+    RESET = $FF00
 .endif
 
 ; --- Zero Page pointers for strcmp ---
@@ -80,6 +114,10 @@ DDOS_START:
     lda #0
     sta is_mounted_flag
 @mount_done:
+    
+    ; Initialize Batch Pointer to 0 (Inactive)
+    lda #0
+    sta BATCH_PTR+1
 
     ; Initialize current path to root "/"
     lda #'/'
@@ -87,6 +125,48 @@ DDOS_START:
     lda #0
     sta current_path+1
 
+    ; --- Check for AUTOEXEC.BAT ---
+    ; We construct the path "/AUTOEXEC.BAT" in ARG_BUFF and check if it exists.
+    ; If it does, we inject "DO AUTOEXEC.BAT" into INPUT_BUFFER and execute it.
+    
+    ; 1. Check existence
+    lda #<str_autoexec
+    sta ptr_temp
+    lda #>str_autoexec
+    sta ptr_temp+1
+    
+    ; Copy string to ARG_BUFF
+    ldy #0
+@copy_auto:
+    lda (ptr_temp), y
+    sta ARG_BUFF, y
+    beq @auto_check
+    iny
+    jmp @copy_auto
+@auto_check:
+    sty ARG_LEN
+    lda #CMD_FS_STAT
+    sta CMD_ID
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    bne shell_loop ; Not found, go to loop
+    
+    ; 2. Found! Inject "DO AUTOEXEC.BAT" command
+    ldx #0
+@inject_cmd:
+    lda str_do_autoexec, x
+    beq @inject_done
+    sta INPUT_BUFFER, x
+    inx
+    jmp @inject_cmd
+@inject_done:
+    sta INPUT_BUFFER, x ; Null terminate
+    
+    ; 3. Execute
+    jsr dispatch_command
+    jmp shell_loop
 
 shell_loop:
     ; Print Prompt
@@ -100,7 +180,7 @@ shell_loop:
     ; Read Line into INPUT_BUFFER
     ldx #0
 @read_loop:
-    jsr CHRIN
+    jsr GET_INPUT       ; Replaces CHRIN
     bcc @read_loop      ; Loop if Carry Clear (No key pressed)
 
     ; --- Handle CR (End of Line) ---
@@ -155,6 +235,51 @@ shell_loop:
     ; --- NEW: Command Dispatcher ---
     jsr dispatch_command
     jmp shell_loop ; All handlers should return to the main loop
+
+; ---------------------------------------------------------------------------
+; GET_INPUT
+; Reads a character from the Batch Buffer if active, otherwise from CHRIN.
+; Returns: Carry Set + Char in A if available. Carry Clear if no input.
+; ---------------------------------------------------------------------------
+GET_INPUT:
+    ; Check if Batch Mode is active (High byte of pointer != 0)
+    lda BATCH_PTR+1
+    beq @use_keyboard
+
+    ; Copy BATCH_PTR to ZP ptr_temp for indirect access
+    lda BATCH_PTR
+    sta ptr_temp
+    lda BATCH_PTR+1
+    sta ptr_temp+1
+
+    ; Read from Batch Buffer using ZP pointer
+    ldy #0
+    lda (ptr_temp), y
+    beq @batch_done     ; Null terminator = End of script
+
+    ; Increment Pointer
+    inc BATCH_PTR
+    bne @no_inc_hi
+    inc BATCH_PTR+1
+@no_inc_hi:
+
+    ; Translate LF ($0A) to CR ($0D) for shell compatibility
+    cmp #$0A
+    bne @no_lf
+    lda #$0D
+@no_lf:
+
+    ; Echo to screen so user sees what's happening
+    jsr OUTCH
+    sec                 ; Carry Set = Character Ready
+    rts
+
+@batch_done:
+    sta BATCH_PTR+1     ; Disable Batch Mode (A is 0)
+    ; Fall through to keyboard
+
+@use_keyboard:
+    jmp CHRIN
 
 ; ---------------------------------------------------------------------------
 ; dispatch_command
@@ -1964,6 +2089,20 @@ do_jump:
     jmp (ptr_temp)
 
 ; ---------------------------------------------------------------------------
+; do_echo - Echo arguments to screen
+; Format: ECHO <string>
+; ---------------------------------------------------------------------------
+do_echo:
+    jsr get_first_arg
+    lda arg_ptr
+    sta ptr_temp
+    lda arg_ptr+1
+    sta ptr_temp+1
+    jsr print_string
+    jsr CRLF
+    rts
+
+; ---------------------------------------------------------------------------
 ; common_send_loadmem_request
 ; Sends CMD_FS_LOADMEM and ARG_BUFF. Reads response header.
 ; Returns: A = Status.
@@ -2502,6 +2641,7 @@ command_table:
     .word cmd_str_copy,   do_copy
     .word cmd_str_touch,  do_touch
     .word cmd_str_jump,   do_jump
+    .word cmd_str_echo,   do_echo
     ; Aliases
     .word cmd_str_ls,    do_dir
     .word cmd_str_rm,    do_del
@@ -2542,18 +2682,21 @@ cmd_str_cp:    .asciiz "CP"
 cmd_str_touch: .asciiz "TOUCH"
 cmd_str_run:   .asciiz "RUN"
 cmd_str_jump:  .asciiz "JUMP"
+cmd_str_echo:  .asciiz "ECHO"
 empty_str:     .asciiz ""
 str_bin_prefix:.asciiz "/BIN/"
 current_path_str: .asciiz "."
 str_bin_suffix:.asciiz ".BIN"
 str_run_prefix:.asciiz "RUN "
+str_autoexec:    .asciiz "/AUTOEXEC.BAT"
+str_do_autoexec: .asciiz "DO /AUTOEXEC.BAT"
 
-START_MSG:       .asciiz "6502 Shell Ready"
+START_MSG:       .asciiz "DDos 6502 Shell Ready"
 MORE_MSG:        .asciiz "--More--"
 ERR_MSG:         .asciiz "TIMEOUT"
 UNK_MSG:         .asciiz "UNKNOWN"
 HELP_MSG:
-    .byte "BUILT-IN: CD CONNECT CP DEL DIR EXIT FORMAT HELP LOADMEM MKDIR MOUNT PING PWD MV RUN SAVEMEM TOUCH CAT", $0D, $0A
+    .byte "BUILT-IN: CD CONNECT CP DEL DIR ECHO EXIT FORMAT HELP LOADMEM MKDIR MOUNT PING PWD MV RUN SAVEMEM TOUCH CAT", $0D, $0A
     .byte "EXTERNAL: *See BIN/ or docs", 0
 NOT_MOUNTED_MSG: .asciiz "NO MOUNT"
 MOUNT_OK_MSG:    .asciiz "MEDIA MOUNTED"
@@ -2572,3 +2715,24 @@ SAVED_MSG:          .asciiz "Done"
 PARSE_ERROR_MSG:    .asciiz "Parse error"
 ARG_ERROR_MSG:      .asciiz "Argument error"
 RANGE_ERROR_MSG:    .asciiz "Invalid range"
+
+; ---------------------------------------------------------------------------
+; Local System Call Implementations
+; ---------------------------------------------------------------------------
+.ifdef BUILD_RAM
+LOCAL_CHRIN:
+    lda ACIA_DATA
+    beq @no_key
+    jsr OUTCH       ; Echo character
+    sec
+    rts
+@no_key:
+    clc
+    rts
+
+LOCAL_CRLF:
+    lda #$0D
+    jsr OUTCH
+    lda #$0A
+    jmp OUTCH
+.endif
