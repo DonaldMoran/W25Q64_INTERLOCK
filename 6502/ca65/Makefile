@@ -1,34 +1,62 @@
-# Makefile for 6502 Smart Peripheral Shell
+# Makefile for RAM Shell and Transient Commands
 
+# Tools
 AS = ca65
 LD = ld65
+RM = rm -f
+CC = gcc
+
+# Flags
+ASFLAGS = -I . --cpu 65c02
 LDFLAGS_SHELL = -C common/ram.cfg
-ASFLAGS = -I . -g
 
-# Shell targets
-SHELL_TARGET = shell/cmd_shell.bin
-SHELL_WOZTARGET = shell/cmd_shell.mon
-SHELL_SOURCES = shell/cmd_shell.s common/pico_lib.s
-SHELL_OBJECTS = $(SHELL_SOURCES:.s=.o)
+# Directories
+SHELL_DIR = shell
+COMMON_DIR = common
+BIN_DIR = bin
+OBJ_DIR = obj
 
-all: $(SHELL_TARGET) $(SHELL_WOZTARGET)
+# Host Tools
+BINTOMON_SRC = ../../tools/utilities/bintomon/bintomon.c
+BINTOMON = $(BIN_DIR)/bintomon
 
-# Shell rules
-$(SHELL_TARGET): $(SHELL_OBJECTS)
-	$(LD) $(LDFLAGS_SHELL) -o $@ $^
+# Targets
+SHELL_BIN = $(BIN_DIR)/cmd_shell.bin
+SHELL_MON = $(BIN_DIR)/cmd_shell.mon
+COMMON_OBJ = $(COMMON_DIR)/pico_lib.o
 
-$(SHELL_WOZTARGET): $(SHELL_TARGET)
-	python3 -c 'import sys; data=sys.stdin.buffer.read(); start=0x1000; [print(f"{start+i:04X}: " + " ".join(f"{b:02X}" for b in data[i:i+8])) for i in range(0, len(data), 8)]' < $< > $@
-	echo "1000R" >> $@
+.PHONY: all clean commands
 
-# Generic rules
-%.o: %.s
-	$(AS) $(ASFLAGS) -l $(@:.o=.lst) -o $@ $<
+all: $(SHELL_BIN) $(SHELL_MON) commands
 
-# Manual Dependencies
-shell/cmd_shell.o: common/pico_def.inc
-common/pico_lib.o: common/pico_def.inc
+# Build Shell
+$(SHELL_BIN): $(OBJ_DIR)/cmd_shell.o $(COMMON_OBJ) common/ram.cfg
+	@mkdir -p $(BIN_DIR)
+	$(LD) $(LDFLAGS_SHELL) -o $@ $(OBJ_DIR)/cmd_shell.o $(COMMON_OBJ)
+
+# Convert Shell to Woz Monitor format
+$(SHELL_MON): $(SHELL_BIN) $(BINTOMON)
+	@echo "MON $< -> $@"
+	$(BINTOMON) -l 0x1000 -r - $< > $@
+
+$(OBJ_DIR)/cmd_shell.o: $(SHELL_DIR)/cmd_shell.s
+	@mkdir -p $(OBJ_DIR)
+	$(AS) $(ASFLAGS) -o $@ $<
+
+# Build Common Lib
+$(COMMON_OBJ): $(COMMON_DIR)/pico_lib.s
+	$(AS) $(ASFLAGS) -o $@ $<
+
+# Build Host Tools
+$(BINTOMON): $(BINTOMON_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) -o $@ $<
+
+# Build Transient Commands (recurse)
+commands:
+	$(MAKE) -C commands
 
 clean:
-	rm -f $(SHELL_OBJECTS) $(SHELL_TARGET) $(SHELL_WOZTARGET)
-	rm -f shell/*.lst common/*.lst *.lst
+	$(RM) -r $(BIN_DIR) $(OBJ_DIR)
+	$(RM) $(COMMON_OBJ)
+	$(MAKE) -C commands clean

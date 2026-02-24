@@ -63,5 +63,10 @@ STATUS_OK       = $00
 STATUS_ERR      = $FF
 STATUS_BUSY     = $01
 STATUS_NO_FILE  = $02
+STATUS_EXIST    = $03
+
+; --- Batch Processing ---
+BATCH_PTR       = $02FE ; 2 bytes: Pointer to current batch command char (0=Inactive)
+BATCH_BUFFER    = $3000 ; Start of batch script buffer in RAM
 
 .endif ; PICO_DEF_INC

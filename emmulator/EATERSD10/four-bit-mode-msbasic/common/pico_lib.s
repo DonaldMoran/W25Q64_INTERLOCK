@@ -4,6 +4,10 @@
 
 .include "common/pico_def.inc"
 
+.export pico_init, pico_send_request, pico_read_bytes, send_byte, read_byte
+.export CMD_ID, ARG_LEN, ARG_BUFF, LAST_STATUS, RESP_LEN, RESP_BUFF, TEMP_LEN
+.export PCR_CA2_LOW, PCR_CA2_HIGH
+
 ; PCR Constants for Manual Handshake (Matches UNIVERSAL.S)
 PCR_CA2_LOW  = $CC      ; CA2 Output Low (Idle)
 PCR_CA2_HIGH = $CE      ; CA2 Output High (Data Ready / Ready to Receive)

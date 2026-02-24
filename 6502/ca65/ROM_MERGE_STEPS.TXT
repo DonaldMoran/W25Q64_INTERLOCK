@@ -54,7 +54,7 @@ Once the shell code is stable in RAM:
     `cp 6502/ca65/shell/cmd_shell.s emmulator/EATERSD10/four-bit-mode-msbasic/`
     `cp -r 6502/ca65/common/* emmulator/EATERSD10/four-bit-mode-msbasic/common/`
 2.  **Rebuild** the ROM:
-    `cd emmulator/EATERSD10/four-bit-mode-msbasic/`
+    `cd emmulator/EATERSD10`
     `./doit.sh`
 3.  **Burn** the new ROM image.
 
