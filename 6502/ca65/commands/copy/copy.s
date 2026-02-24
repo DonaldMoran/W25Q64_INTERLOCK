@@ -5,7 +5,19 @@
 ; This is a transient program. Invoke with:
 ; RUN COPY.BIN <source_file> <destination_file>
 ; -----------------------------------------------------------------------------
- 
+
+; ---------------------------------------------------------------------------
+; Explicitly declare external symbols from pico_lib.s
+; ---------------------------------------------------------------------------
+.import pico_send_request, send_byte, read_byte
+.import pico_init  ; <-- ADD THIS LINE
+.import CMD_ID, ARG_LEN, ARG_BUFF, LAST_STATUS, RESP_LEN, RESP_BUFF
+
+; ---------------------------------------------------------------------------
+; Include constants (optional - can use numeric values)
+; ---------------------------------------------------------------------------
+.include "../../common/pico_def.inc"
+
 ; System Constants
 LOAD_ADDR    = $0800   ; Standard load address for transient programs
 INPUT_BUFFER = $0300    ; Location of Input Buffer from shell
@@ -156,5 +168,3 @@ find_next_word:
     bcc @done
     inc arg_scan_ptr+1
     rts
-
-.include "common/pico_lib.s"

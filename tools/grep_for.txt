@@ -1,0 +1,21 @@
+grep -r -i \
+  --include="*.c" \
+  --include="*.h" \
+  --include="*.txt" \
+  --include="*.md" \
+  --include="*.cfg" \
+  --include="*.ini" \
+  --exclude-dir="vasm" \
+  --exclude-dir="emmulator" \
+  --exclude-dir="littlefs" \
+  --exclude-dir="tools" \
+  --exclude-dir=".git" \
+  --exclude-dir="build" \
+  --exclude-dir="dist" \
+  --exclude-dir="node_modules" \
+  --exclude-dir="venv" \
+  --exclude-dir="env" \
+  --exclude-dir="__pycache__" \
+  --exclude-dir=".vscode" \
+  --exclude-dir=".idea" \
+  -E "(cmd_net_http_get|cmd_net_http_put|cmd_net_setserver|network command|command id|CMD_NET_|file i/o|open file|read file|0x[0-9A-Fa-f]{2})" .
