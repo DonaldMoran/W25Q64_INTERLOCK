@@ -33,6 +33,9 @@
 // Add with other filesystem commands (around line 30)
 #define CMD_FS_SAVEMEM  0x23  // Args: [Filename]\0[Len(2)]. Streams memory bytes from 6502
 #define CMD_FS_LOADMEM  0x24  // Args: [Filename]. Returns: [Status][Len(2)][Data...]
+#define CMD_FS_REMOVE_RECURSIVE 0x25 // Args: [Path]. Recursive remove
+#define CMD_FS_DELETE_CONTENTS  0x26 // Args: [Path]. Delete all files in dir
+#define CMD_FS_TREE     0x27  // Args: [Path]. Returns: Stream of tree text
 
 // --- NETWORK COMMANDS (0x30 - 0x4F) ---
 #define CMD_NET_STATUS     0x30  // Args: None. Returns: Status (0=Down, 1=Up)

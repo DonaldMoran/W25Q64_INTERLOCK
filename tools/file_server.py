@@ -40,6 +40,19 @@ class PicoFileHandler(SimpleHTTPRequestHandler):
 
         files.sort(key=lambda a: a.lower())
 
+        # Check for PicoDOS User-Agent and return plain text
+        if self.headers.get('User-Agent') == 'PicoDOS':
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain; charset=utf-8")
+            self.end_headers()
+            for name in files:
+                fullname = os.path.join(path, name)
+                if os.path.isdir(fullname):
+                    self.wfile.write(f"{name}/\n".encode("utf-8"))
+                else:
+                    self.wfile.write(f"{name}\n".encode("utf-8"))
+            return None
+
         # Build relative path for display
         rel_path = os.path.relpath(path, DIRECTORY)
         if rel_path == ".":

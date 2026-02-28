@@ -15,10 +15,6 @@
 
 void bus_init(void) {
     // ============================================================
-    // 1. Force the bus into a known idle state
-    // ============================================================
-    bus_reset_handshake();
-
     PIO pio = PIO_INST;
 
     // ============================================================
@@ -31,6 +27,7 @@ void bus_init(void) {
         pio_gpio_init(pio, pin);
         gpio_set_slew_rate(pin, GPIO_SLEW_RATE_SLOW);
         gpio_set_drive_strength(pin, GPIO_DRIVE_STRENGTH_4MA);
+        gpio_pull_down(pin); // Ensure bus reads 0x00 when 6502 is High-Z (Sync)
     }
     pio_gpio_init(pio, CA2_PIN);
     pio_gpio_init(pio, CA1_PIN);
@@ -75,9 +72,9 @@ void bus_init(void) {
     pio_sm_init(pio, TX_SM, offset_tx, &c_tx);
 
     // ============================================================
-    // 5. Put CA1 into a known idle state under PIO control
+    // 5. Put CA1 into BUSY state (Low) until Main Loop is ready
     // ============================================================
-    pio_sm_set_pins_with_mask(pio, TX_SM, 1u << CA1_PIN, 1u << CA1_PIN);
+    pio_sm_set_pins_with_mask(pio, TX_SM, 0, 1u << CA1_PIN); // Drive Low
     pio_sm_set_pindirs_with_mask(pio, TX_SM, 1u << CA1_PIN, 1u << CA1_PIN);
     pio_sm_set_enabled(pio, TX_SM, false);
 

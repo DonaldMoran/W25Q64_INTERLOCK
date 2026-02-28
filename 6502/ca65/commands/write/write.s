@@ -104,8 +104,12 @@ editor_loop:
     
     ; Control characters
     cmp #$18 ; Ctrl+X
-    bne @check_bs
+    bne @check_find
     jmp exit_check
+@check_find:
+    cmp #$06 ; Ctrl+F
+    bne @check_bs
+    jmp handle_find
 @check_bs:
     cmp #$08 ; Backspace
     bne @check_del
@@ -621,6 +625,146 @@ handle_enter:
     jsr redraw_screen
     
     jmp loop_continue
+
+; ---------------------------------------------------------------------------
+; handle_find: Search for text
+; ---------------------------------------------------------------------------
+handle_find:
+    ; 1. Prompt for search string
+    jsr CRLF
+    lda #<search_prompt
+    ldy #>search_prompt
+    jsr print_str_ay
+    
+    ; 2. Read input
+    ldy #0
+@read_search:
+    jsr CHRIN
+    cmp #$0D ; Enter
+    beq @search_start
+    cmp #$1B ; ESC - Cancel
+    beq @cancel_search
+    cmp #$08 ; Backspace
+    beq @search_bs
+    cmp #$7F ; Delete
+    beq @search_bs
+    cmp #$20
+    bcc @read_search
+    
+    sta search_buf, y
+    jsr OUTCH
+    iny
+    cpy #63
+    bcc @read_search
+    jmp @read_search
+    
+@search_bs:
+    cpy #0
+    beq @read_search
+    dey
+    lda #$08
+    jsr OUTCH
+    lda #' '
+    jsr OUTCH
+    lda #$08
+    jsr OUTCH
+    jmp @read_search
+
+@cancel_search:
+    jsr redraw_screen
+    jmp loop_continue
+
+@search_start:
+    lda #0
+    sta search_buf, y ; Null terminate
+    sta search_len    ; Use search_len as wrap flag (0=no wrap yet)
+    
+    ; 3. Search loop
+    ; Start from current cursor (t_str_ptr1)
+    ; Use t_str_ptr2 for scanning
+    lda t_str_ptr1
+    sta t_str_ptr2
+    lda t_str_ptr1+1
+    sta t_str_ptr2+1
+    
+@scan_loop:
+    ; Check for end of buffer
+    ldy #0
+    lda (t_str_ptr2), y
+    beq @check_wrap
+    
+    ; Compare with search_buf
+    jsr check_match
+    bcc @found_match ; Carry clear = match found
+    
+    ; Advance ptr2
+    jsr inc_str_ptr2
+    jmp @scan_loop
+
+@found_match:
+    ; Move cursor to found location
+    lda t_str_ptr2
+    sta t_str_ptr1
+    lda t_str_ptr2+1
+    sta t_str_ptr1+1
+    jsr redraw_screen
+    jmp loop_continue
+
+@check_wrap:
+    lda search_len
+    bne @not_found      ; Already wrapped? Then truly not found.
+    
+    ; Wrap to start of buffer
+    inc search_len      ; Set wrap flag
+    lda #<text_buffer_fixed
+    sta t_str_ptr2
+    lda #>text_buffer_fixed
+    sta t_str_ptr2+1
+    jmp @scan_loop
+
+@not_found:
+    jsr CRLF
+    lda #<not_found_msg
+    ldy #>not_found_msg
+    jsr print_str_ay
+    jsr CRLF
+    
+    ; Wait for key
+    jsr CHRIN
+    jsr redraw_screen
+    jmp loop_continue
+
+; Helper: Check if string at t_str_ptr2 matches search_buf
+; Returns: Carry Clear if match, Carry Set if no match
+check_match:
+    tya
+    pha ; Save Y
+    
+    ldy #0
+@cmp_loop:
+    lda search_buf, y
+    beq @match_ok ; End of search string = Match
+    
+    ; Get char from buffer (ptr2 + Y)
+    ; We can't use (zp),y easily if Y is large, but search_buf is small (<64)
+    ; However, t_str_ptr2 is the base.
+    lda (t_str_ptr2), y
+    cmp search_buf, y
+    bne @no_match_cmp
+    
+    iny
+    jmp @cmp_loop
+
+@match_ok:
+    pla
+    tay
+    clc
+    rts
+@no_match_cmp:
+    pla
+    tay
+    sec
+    rts
 
 loop_continue:
     jsr update_status_bar
@@ -1448,12 +1592,14 @@ ansi_restore:    .byte $1B, "[u", 0
 header_msg:      .asciiz "WRITE - Nano-like Editor "
 no_file_msg:     .asciiz "[No File]"
 separator_msg:   .asciiz "--------------------------------------------------------------------------------"
-footer_msg:      .asciiz "^X Exit | Arrow Keys | BACKSPACE DEL | DEL |"
+footer_msg:      .asciiz "^X Exit | ^F Search | Arrow Keys | BS DEL |"
 msg_line:        .asciiz " Line: "
 msg_col:         .asciiz " Col: "
 save_prompt:     .asciiz "Save modified buffer? (Y/N) "
 filename_prompt: .asciiz "Filename: "
 msg_saving:      .asciiz "Saving..."
+search_prompt:   .asciiz "Search: "
+not_found_msg:   .asciiz "Not Found"
 msg_done:        .asciiz "Done"
 msg_err:         .asciiz "Error"
 stream_start_msg: .asciiz "Sending data: "
@@ -1472,6 +1618,8 @@ file_length_hi:    .res 1
 bytes_remaining_lo:.res 1
 bytes_remaining_hi:.res 1
 filename_buf:      .res 128
+search_buf:        .res 64
+search_len:        .res 1
 
 ; FIXED SIZE TEXT BUFFER
 text_buffer_fixed: .res 4096  ; 4KB fixed buffer

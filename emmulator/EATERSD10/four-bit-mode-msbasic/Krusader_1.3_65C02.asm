@@ -2788,8 +2788,6 @@ SPINC3: .byte $0A, $05, $05, $05, $05, $0C, $05, $05
 
 ; commands
 
-; NUMCMD	=$0D
-; CMDS	.ASCII "NLXEMRDI!$AVP"
 NUMCMD = $0F
 CMDS:   .byte "NLXEMRDI!$AVPSF"
 
@@ -2807,8 +2805,8 @@ A1 = ASSEM-1
 V1 = VALUE-1
 P1 = PANIC-1
 ; DON ADDED KRU_SAVE AND FILL
-S1 = KRU_SAVE-1
-F1 = FETCH-1
+S1 = EXT_SAVE_SRC-1
+F1 = EXT_LOAD_SRC-1
 
 CMDH:   .byte >N1
         .byte >L1
@@ -3264,7 +3262,7 @@ OUTCH:  STA PUTCH
 ; .ORG $FFFA	; INTERRUPT VECTORS
 .segment "RESETVEC"
         .word $0F00
-        .word RESET
+        .word START
         .word DEBUG
         .endif
         .else
@@ -3277,4 +3275,3 @@ KBD = $D010		; Apple 1 Keyboard character read.
 KBDRDY = $D011		; Apple 1 Keyboard data waiting when negative.
 
         .endif          ; inrom
-

@@ -470,14 +470,98 @@ void callback() {
 #endif
 }
 
+// =============================================================================
+// SYNC BRIDGE
+// Forces the Bridge Pico into a known state by performing dummy reads.
+// 1. If Bridge is stuck in TX (sending), this drains the bytes.
+// 2. If Bridge is in RX (listening), it reads 0x00 (Pull-Downs),
+//    executes CMD_00 (Invalid), and returns STATUS_ERR (0x01).
+// =============================================================================
+void sync_bridge() {
+    printf("SYNC: Synchronizing with Bridge...\n");
+
+    // 1. Configure Bus for Dummy Read
+    // Set Data Bus to Input
+    gpio_set_dir_masked(0xFF, 0x00); 
+    
+    // Set CA2 (Request) to Output, Start Low
+    gpio_init(PIN_CA2);
+    gpio_set_dir(PIN_CA2, GPIO_OUT);
+    gpio_put(PIN_CA2, 0);
+
+    // CA1 is Input
+    gpio_init(PIN_CA1);
+    gpio_set_dir(PIN_CA1, GPIO_IN);
+    gpio_pull_down(PIN_CA1); // Default to Busy (Low) if Bridge is off
+    
+    mem[0x0002] = 0; // Clear Skip Mount Flag (Default: Attempt Mount)
+
+    // Quick check: If Bridge is unpowered, CA1 will likely be Low (clamped).
+    // If Bridge is powered and Idle, CA1 should be High (Pull-Up).
+    if (gpio_get(PIN_CA1) == 0) {
+        printf("SYNC: Waiting for Bridge (CA1 Low)... Press ESC to skip.\n");
+        while (gpio_get(PIN_CA1) == 0) {
+            int c = getchar_timeout_us(10000); // 10ms wait
+            if (c == 0x1B) { // ESC
+                printf("\nSYNC: Skipped by user.\n");
+                gpio_set_dir(PIN_CA2, GPIO_IN); // Release CA2
+                mem[0x0002] = 1; // Set Flag: Tell BIOS to skip mount
+                return;
+            }
+        }
+        printf("\nSYNC: Bridge detected!\n");
+    }
+
+    // 2. Pump the bus until we see a Status Byte (0x01)
+    // We try up to 16 times (enough to clear any pending transaction)
+    for (int i = 0; i < 16; i++) {
+        // Start Handshake (CA2 High)
+        gpio_put(PIN_CA2, 1);
+        
+        // Wait for Ack (CA1 Low) with Timeout
+        int timeout = 10000;
+        while (gpio_get(PIN_CA1) == 1 && timeout-- > 0) sleep_us(1);
+        if (timeout <= 0) {
+            printf("SYNC: Bridge not responding (CA1 stuck High). Skipping.\n");
+            gpio_put(PIN_CA2, 0);
+            gpio_set_dir(PIN_CA2, GPIO_IN); // Release CA2
+            return;
+        }
+
+        // Read Data
+        uint8_t data = (uint8_t)(gpio_get_all() & 0xFF);
+
+        // End Handshake (CA2 Low)
+        gpio_put(PIN_CA2, 0);
+        
+        // Wait for Ack Release (CA1 High)
+        timeout = 10000;
+        while (gpio_get(PIN_CA1) == 0 && timeout-- > 0) sleep_us(1);
+
+        // Check if we caught the STATUS_ERR (0xFF) from a 0x00 command
+        if (data == 0xFF) {
+            printf("SYNC: Bridge Synced! (Found STATUS_ERR)\n");
+            // Consume the next 2 bytes (Len Lo, Len Hi) to finish the frame
+            // We just do the toggles, ignoring data
+            for(int j=0; j<2; j++) {
+                gpio_put(PIN_CA2, 1); while(gpio_get(PIN_CA1)==1);
+                gpio_put(PIN_CA2, 0); while(gpio_get(PIN_CA1)==0);
+            }
+            gpio_set_dir(PIN_CA2, GPIO_IN); // Release CA2
+            return;
+        }
+    }
+    printf("SYNC: Timeout or no sync marker found. Assuming Bridge is ready.\n");
+    gpio_set_dir(PIN_CA2, GPIO_IN); // Release CA2
+}
 
 
 int main() {
 
 #ifdef OVERCLOCK
-    vreg_set_voltage(VREG_VOLTAGE_1_20); // Safer for 280 MHz
+    vreg_set_voltage(VREG_VOLTAGE_1_30); // Max voltage for stability
     sleep_ms(10);
-    set_sys_clock_khz(270000, true);
+    set_sys_clock_khz(266000, true); // 266MHz / 2 = 133MHz (Flash max spec)
 #endif
 
     // Initialize USB only (skip UART initialization)
@@ -505,7 +589,7 @@ int main() {
     uart_set_fifo_enabled(uart1, false);
     uart_set_format(uart1, 8, 1, UART_PARITY_NONE);
 
-    printf("DEBUG: main() is running\n");
+    //printf("DEBUG: main() is running\n");
 
 
     if (R_START + R_SIZE > 0x10000) {
@@ -515,6 +599,9 @@ int main() {
     for (int i = R_START; i < R_SIZE + R_START; i++) {
         mem[i] = R_VAR[i - R_START];
     }
+
+    // Perform Hardware Sync before starting 6502 emulation
+    sync_bridge();
 
     hookexternal(callback);
     reset6502();
@@ -557,11 +644,11 @@ int main() {
     // START of added code for VIA control lines
     gpio_init(PIN_CA1);
     gpio_set_dir(PIN_CA1, GPIO_IN);
-    gpio_disable_pulls(PIN_CA1);
+    gpio_pull_down(PIN_CA1); // Default to Busy (Low) if Bridge is off
     
     gpio_init(PIN_CA2);
     gpio_set_dir(PIN_CA2, GPIO_IN);
-    gpio_disable_pulls(PIN_CA2);  
+    gpio_disable_pulls(PIN_CA2); // Real hardware has no pulls
     
     gpio_init(PIN_CB1);
     gpio_set_dir(PIN_CB1, GPIO_IN);
