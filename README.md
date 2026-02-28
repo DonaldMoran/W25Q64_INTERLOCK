@@ -73,6 +73,31 @@ The 65C02 computer issues commands, which are transmitted through the 6522 VIA t
 | `GET [REMOTE] [LOCAL]` | | Download file via HTTP (External) |
 | `PUT [LOCAL] [REMOTE]` | | Upload file via HTTP (External) |
 | `CAT [FILE]` | | Display file contents (External) |
+| `CP [SRC] [DST]` | | Copy file (External) |
+| `RM-FR [PATH]` | | Recursive delete directory (External) |
+| `RM*` | | Delete all files in current dir (External) |
+| `TREE [PATH]` | | Visualize directory structure (External) |
+| `PICORBT` | | Reboot Bridge Pico (External) |
+| `CATALOG [PATH]` | | Streaming directory list for any size (External) |
+| `BASIC` | | Start MSBASIC (External) |
+| `KRUSADER` | | Start Krusader Assembler (External) |
+| `WOZMON` | | Start WozMon Monitor (External) |
+| `HEAD [FILE]` | | Print first 10 lines of file (External) |
+| `HEX [FILE]` | | Hex dump of file (External) |
+| `TAIL [FILE]` | | Print last 10 lines of file (External) |
+| `GREP [PATTERN] [FILE]` | | Search for pattern in file (External) |
+| `WC [FILE]` | | Count lines, words, and characters (External) |
+| `DIFF [FILE1] [FILE2]` | | Compare two files (External) |
+| `CALC` | | Retro Calculator (External) |
+
+### Retro Calculator Details (`CALC`)
+
+- **Features:**
+  - Hex/Binary/Decimal conversions
+  - Address range calculations
+  - Simple arithmetic (addition, subtraction, multiplication, division)
+  - Comprehensive input validation and error handling
+  - Menu-driven interface
 
 ## Command Protocol Reference
 
@@ -230,6 +255,14 @@ RUN ABC.BIN
 
 Output: `ABCDEFGHIJKLMNOPQRSTUVWXYZ`
 
+### Krusader Extensions
+
+The Krusader assembler has been patched with new file I/O commands:
+
+- **`S <filename>`**: Save Source. Saves the current source code buffer to a file.
+- **`F <filename>`**: Fetch Source. Loads a source file into the buffer and re-indexes it.
+- **`O <filename>`**: Save Object. Saves the assembled binary (from `$0300` or defined origin) to a file.
+
 ---
 
 ## 8. Memory Management
@@ -334,6 +367,16 @@ Implement your own simple parsing
 ### 11.4 Shared Buffers and Functions
 
 ```assembly
+; Zero Page Assignments
+; ---------------------------------------------------------------------------
+;The shell reserves `$50-$57`. Transient commands **MUST** use `$58-$7F` only.
+
+```asm
+$50-$57 RESERVED FOR SHELL - DO NOT USE
+$58-$7F AVAILABLE FOR TRANSIENT COMMANDS
+```
+
+```assembly
 ; Buffers (from pico_lib.s)
 ARG_BUFF    = $0400  ; 256-byte argument buffer
 INPUT_BUFFER = $0300 ; Shell input buffer (contains command line)
@@ -342,6 +385,7 @@ LAST_STATUS = $??    ; Status from last Pico command
 ; Imported functions
 .import pico_send_request, send_byte, read_byte
 .import CMD_ID, ARG_LEN, ARG_BUFF, LAST_STATUS, RESP_LEN, RESP_BUFF
+
 ```
 
 ### 11.5 The Definitive Transient Command Pattern
@@ -716,28 +760,50 @@ Maintains the future ideas section
 - **ROM Integration:** The shell has been moved to ROM at `$E000`, freeing up RAM for transient programs.
 - **Auto-Mount:** Filesystem now mounts automatically on boot.
 
-### Applications Section
+## Applications Section
 
-- A new transient command `WRITE` has been implemented, providing a Nano-like text editing experience on the 6502 system.
+- This section highlights some of the key applications developed for the 6502 system.
 
-**Key Features:**
+- **Text Editor (`WRITE`)**
 
-- **User Interface:** Full-screen editor with a header displaying the filename and a footer showing command shortcuts.
-- **Input Handling:**
-  - Supports standard alphanumeric input.
-  - Handles `Enter` for newlines and `Tab` for spacing.
-  - **Backspace:** Implemented visual and buffer-level character deletion.
-  - **Arrow Keys:** Escape sequence detection is in place to gracefully handle cursor keys.
-- **File Management:**
-  - **Launch with Filename:** `WRITE <filename>` opens the editor with the target file pre-set.
-  - **Launch Empty:** `WRITE` opens a blank buffer.
-  - **Save & Exit:** Triggered via `Ctrl+X`.
-  - **Smart Prompting:** If a filename was not provided at launch, the editor prompts the user to enter one upon saving.
-- **Architecture:**
-  - Operates as a transient command loaded at `$0800`.
-  - Utilizes a 4KB fixed memory buffer for text storage.
-  - Integrates with the shell's Current Working Directory (CWD) for relative path resolution.
-  - Implements robust stack management to prevent corruption during execution.
+  - A new transient command `WRITE` has been implemented, providing a Nano-like text editing experience on the 6502 system.
+
+  - **Key Features:**
+
+    - **User Interface:** Full-screen editor with a header displaying the filename and a footer showing command shortcuts.
+      - **Input Handling:**
+        - Supports standard alphanumeric input.
+        - Handles `Enter` for newlines and `Tab` for spacing.
+        - **Backspace:** Implemented visual and buffer-level character deletion.
+      - **Arrow Keys:** Escape sequence detection is in place to gracefully handle cursor keys.
+        - **Search:** `Ctrl+F` triggers a text search from the current cursor position, wrapping to the start if needed.
+      - **File Management:**
+      - **Launch with Filename:** `WRITE <filename>` opens the editor with the target file pre-set.
+      - **Launch Empty:** `WRITE` opens a blank buffer.
+      - **Save & Exit:** Triggered via `Ctrl+X`.
+      - **Smart Prompting:** If a filename was not provided at launch, the editor prompts the user to enter one upon saving.
+  - **Architecture:**
+    - Operates as a transient command loaded at `$0800`.
+    - Utilizes a 4KB fixed memory buffer for text storage.
+    - Integrates with the shell's Current Working Directory (CWD) for relative path resolution.
+    - Implements robust stack management to prevent corruption during execution.
+
+- **Retro Calculator Details (`CALC`)**
+
+  - **Features:**
+    - Hex/Binary/Decimal conversions
+    - Address range calculations
+    - Simple arithmetic (addition, subtraction, multiplication, division)
+    - Comprehensive input validation and error handling
+    - Menu-driven interface
+
+### MSBASIC Memory Configuration
+
+To prevent memory corruption when using `SAVE` and `LOAD` commands in MSBASIC, the start of BASIC program memory (`RAMSTART2`) has been moved.
+
+- **Old Location:** `$0800` (Standard for many 6502 systems)
+- **New Location:** `$0B00`
+- **Reason:** The Shell and Pico Interface library use a BSS segment starting at `$0400` for variables and large I/O buffers (`ARG_BUFF`, `RESP_BUFF`). This segment grows up to approximately `$0AA0`. Moving BASIC to `$0B00` ensures that file operations do not overwrite the running BASIC program.
 
 ## 18. Development Workflow (RAM Testing)
 
@@ -867,14 +933,45 @@ Before building, open `src/main.c` and configure your network settings:
 
 5. **Flash:** Hold the BOOTSEL button on your standard Pico, connect it to USB, and copy the generated `.uf2` file to the `RPI-RP2` drive.
 
-### Last commit branch feature/transient-6
+### Last commit branch feature/transient-7
 
-- **Command List:**
+**Accomplishments:**
 
-  - Added ECHO and DO to the command table.
+1. **System Stability & Synchronization:**
+    - Implemented a robust handshake synchronization mechanism (`sync_bridge`) to prevent deadlocks when the 6502 and Pico are powered on in different orders.
+    - The emulator now waits for the Bridge to be ready, but provides a "Press ESC to skip" option.
+    - **Boot Behavior:** If the Bridge is present, the system mounts the filesystem and boots into the **DDOS Shell**. If the Bridge is offline (skipped), it boots into the **WozMon Monitor**.
+    - Adjusted Host Pico clock speed (266MHz) and voltage (1.30V) to improve boot reliability.
+    - Fixed bus state initialization to prevent spurious command triggering.
 
-- **Changelog:**
+2. **New Transient Commands:**
+    - **`RM-FR`**: Recursively removes directories and their contents.
+    - **`RM*`**: Deletes all files in the current directory (with safety prompt).
+    - **`TREE`**: Visualizes the directory structure and file sizes.
+    - **`PICORBT`**: Allows the 6502 to remotely reboot the Bridge Pico (useful for clearing stuck file handles).
+    - **`CP`**: Copy command with relative path support.
+    - **`NUKE`**: A specialized tool created to delete files with invalid characters (e.g., quotes) in their names.
 
-- Added a new section for **feature/transient-6** detailing:
-  - Batch Scripting: **DO**, **AUTOEXEC.BAT**, **ECHO**
-  - Editor Improvements: **Insert Mode**, **Navigation**
+3. **Krusader Integration:**
+    - Patched the Krusader assembler in ROM to support direct File I/O.
+    - Added `S` (Save Source), `F` (Fetch Source), and `O` (Save Object) commands to the Krusader shell.
+
+4. **Pico Firmware Enhancements:**
+    - Added `CMD_FS_TREE` for server-side tree generation (streaming response).
+    - Added `CMD_FS_REMOVE_RECURSIVE` and `CMD_FS_DELETE_CONTENTS` to offload heavy filesystem operations from the 6502.
+    - Improved `CMD_RESET` to cleanly unmount the filesystem before rebooting.
+
+5. **Editor Enhancements (`WRITE`):**
+    - Added `Find` command (`Ctrl+F`) to search for text strings within the buffer with wrap-around support.
+    - Editor Improvements: **Insert Mode**, **Navigation**
+
+6. **Caclculator (`CALC`):**
+    - Added a new application which is a menu-driven utility for the 6502 system that performs hexadecimal, binary, and decimal conversions, address range calculations, and basic arithmetic operations with comprehensive input validation.
+
+### Design Note: `DIR`/`LS` vs `CATALOG`
+
+A key design choice has been made to balance features against the shell's limited ROM space (`< 4KB`).
+
+- **`DIR` (aliased as `LS`)** is a built-in command that uses a fixed 1024-byte buffer to display directory listings. This keeps the core shell small and fast for common use cases. It will fail if a directory listing exceeds 1024 bytes.
+
+- **`CATALOG`** is a new transient command that implements a streaming protocol. It reads the directory listing byte-by-byte and can therefore handle directories of any size without being limited by a buffer. It is the recommended command for very large directories.

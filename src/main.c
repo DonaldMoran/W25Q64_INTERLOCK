@@ -54,6 +54,7 @@ void init_handles() {
 pico_state_t current_state = STATE_IDLE;
 uint16_t stream_bytes_remaining = 0;
 lfs_file_t stream_file;
+bool stream_file_is_open = false; // Track if stream_file is open
 #define SAVEMEM_BUF_SIZE 256
 uint8_t savemem_buf[SAVEMEM_BUF_SIZE];
 uint16_t savemem_buf_pos = 0;
@@ -146,6 +147,125 @@ int calc_dotw(int y, int m, int d) {
     return (y + y/4 - y/100 + y/400 + t[m-1] + d) % 7;
 }
 
+// --- RECURSIVE REMOVE HELPER ---
+int recursive_remove(lfs_t *lfs, const char *path) {
+    lfs_dir_t dir;
+    struct lfs_info info;
+    
+    // Try to open as directory
+    int err = lfs_dir_open(lfs, &dir, path);
+    if (err) {
+        // Not a directory or doesn't exist, try removing as file
+        return lfs_remove(lfs, path);
+    }
+
+    while (true) {
+        int res = lfs_dir_read(lfs, &dir, &info);
+        if (res < 0) {
+            lfs_dir_close(lfs, &dir);
+            return res;
+        }
+        if (res == 0) break; // End of directory
+
+        if (strcmp(info.name, ".") == 0 || strcmp(info.name, "..") == 0) continue;
+
+        // Construct subpath
+        size_t path_len = strlen(path);
+        size_t name_len = strlen(info.name);
+        char *subpath = malloc(path_len + 1 + name_len + 1);
+        if (!subpath) {
+            lfs_dir_close(lfs, &dir);
+            return LFS_ERR_NOMEM;
+        }
+        sprintf(subpath, "%s/%s", path, info.name);
+
+        if (info.type == LFS_TYPE_DIR) {
+            res = recursive_remove(lfs, subpath);
+        } else {
+            res = lfs_remove(lfs, subpath);
+        }
+        free(subpath);
+        
+        if (res < 0) {
+            lfs_dir_close(lfs, &dir);
+            return res;
+        }
+    }
+
+    lfs_dir_close(lfs, &dir);
+    return lfs_remove(lfs, path);
+}
+
+// --- DELETE CONTENTS HELPER ---
+int delete_directory_contents(lfs_t *lfs, const char *path) {
+    lfs_dir_t dir;
+    struct lfs_info info;
+    
+    int err = lfs_dir_open(lfs, &dir, path);
+    if (err) return err;
+
+    while (true) {
+        int res = lfs_dir_read(lfs, &dir, &info);
+        if (res < 0) {
+            lfs_dir_close(lfs, &dir);
+            return res;
+        }
+        if (res == 0) break; // End of directory
+
+        if (strcmp(info.name, ".") == 0 || strcmp(info.name, "..") == 0) continue;
+
+        // Construct subpath
+        size_t path_len = strlen(path);
+        size_t name_len = strlen(info.name);
+        char *subpath = malloc(path_len + 1 + name_len + 1);
+        if (!subpath) {
+            lfs_dir_close(lfs, &dir);
+            return LFS_ERR_NOMEM;
+        }
+        sprintf(subpath, "%s/%s", path, info.name);
+
+        // Reuse recursive_remove to delete the item (file or dir)
+        res = recursive_remove(lfs, subpath);
+        free(subpath);
+        
+        if (res < 0) {
+            lfs_dir_close(lfs, &dir);
+            return res;
+        }
+    }
+
+    return lfs_dir_close(lfs, &dir);
+}
+
+// --- TREE GENERATOR HELPER ---
+void generate_tree(lfs_t *lfs, const char *path, lfs_file_t *file, int depth) {
+    lfs_dir_t dir;
+    struct lfs_info info;
+    if (lfs_dir_open(lfs, &dir, path) != 0) return;
+
+    while (lfs_dir_read(lfs, &dir, &info) > 0) {
+        if (strcmp(info.name, ".") == 0 || strcmp(info.name, "..") == 0) continue;
+
+        char line[256];
+        int indent = depth * 2;
+        // Simple indentation
+        for(int i=0; i<indent; i++) line[i] = ' ';
+        
+        if (info.type == LFS_TYPE_DIR) {
+            int len = snprintf(line + indent, sizeof(line) - indent, "[%s]\n", info.name);
+            lfs_file_write(lfs, file, line, indent + len);
+            
+            char subpath[256];
+            snprintf(subpath, sizeof(subpath), "%s/%s", path, info.name);
+            generate_tree(lfs, subpath, file, depth + 1);
+        } else {
+            int len = snprintf(line + indent, sizeof(line) - indent, "%s (%ld)\n", info.name, info.size);
+            lfs_file_write(lfs, file, line, indent + len);
+        }
+    }
+    lfs_dir_close(lfs, &dir);
+}
+
 int main() {
     stdio_init_all();
     sleep_ms(2000);
@@ -181,8 +301,19 @@ int main() {
         fs_mounted = true;
         printf("LittleFS: Auto-mounted successfully\n");
     } else {
-        printf("LittleFS: Auto-mount failed (%d)\n", boot_mount_err);
+        printf("LittleFS: Auto-mount failed (%d). Retrying...\n", boot_mount_err);
+        sleep_ms(50);
+        boot_mount_err = lfs_mount(&lfs, &w25q_cfg);
+        if (boot_mount_err == 0) {
+            fs_mounted = true;
+            printf("LittleFS: Auto-mounted successfully on retry\n");
+        } else {
+            printf("LittleFS: Auto-mount failed (%d)\n", boot_mount_err);
+        }
     }
+
+    // Signal 6502 that we are ready (Release CA1 to High/Idle)
+    bus_reset_handshake();
 
     while (1) {
         cyw43_arch_poll(); // Essential for Wi-Fi background operations
@@ -198,6 +329,7 @@ int main() {
             int written = lfs_file_write(&lfs, &stream_file, savemem_buf, savemem_buf_pos);
             if (written != savemem_buf_pos) {
                 lfs_file_close(&lfs, &stream_file); // Attempt to close
+                stream_file_is_open = false;
                 bus_write_byte(STATUS_ERR);
                 bus_write_byte(0); bus_write_byte(0);
                 current_state = STATE_IDLE;
@@ -210,6 +342,7 @@ int main() {
         if (stream_bytes_remaining == 0) {
             // Now perform the slow file close operation
             int err = lfs_file_close(&lfs, &stream_file);
+            stream_file_is_open = false;
 
             // And send the final status to the waiting 6502
             if(err){
@@ -249,6 +382,7 @@ int main() {
         
         if (stream_bytes_remaining == 0) {
              lfs_file_close(&lfs, &stream_file);
+             stream_file_is_open = false;
              printf("LOADMEM: Complete\n");
              current_state = STATE_IDLE;
              bus_reset_handshake();
@@ -407,10 +541,20 @@ int main() {
                 break;
 
             case CMD_RESET:
-                // Enable the watchdog, then wait for it to timeout and reset the device
-                watchdog_enable(1, 1); // Timeout after 1ms, pause on debug
-                // We should never get here.
-                while(1);
+                // Schedule reset in 100ms to allow time to send the response back to 6502
+                if (fs_mounted) {
+                    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+                        if (open_files[i].used) lfs_file_close(&lfs, &open_files[i].file);
+                    }
+                    if (stream_file_is_open) {
+                        lfs_file_close(&lfs, &stream_file);
+                        stream_file_is_open = false;
+                    }
+                    lfs_unmount(&lfs);
+                }
+                resp_buf[0] = STATUS_OK;
+                payload_len = 0;
+                watchdog_enable(100, 1); 
                 break;
 
             case CMD_FS_MOUNT:
@@ -496,9 +640,25 @@ int main() {
                                 len = snprintf(out + written, max_space - written, "%-12s %7ld\n", info.name, info.size);
                             }
                             
-                            if (len > 0) written += len;
+                            if (len > 0) {
+                                if (written + len > max_space) {
+                                    written = max_space;
+                                    break; // Buffer full, stop listing
+                                }
+                                written += len;
+                            }
                         }
                         lfs_dir_close(&lfs, &dir);
+
+                        // Add null terminator if there's space
+                        if (written < max_space) {
+                            out[written] = '\0';
+                            written++;  // Include null in length
+                        } else if (max_space > 0) {
+                            // Force null at the end of buffer
+                            out[max_space - 1] = '\0';
+                            written = max_space;
+                        }
                         
                         resp_buf[0] = STATUS_OK;
                         payload_len = written;
@@ -517,6 +677,84 @@ int main() {
                         resp_buf[0] = (err == 0) ? STATUS_OK : STATUS_ERR;
                     }
                     payload_len = 0;
+                }
+                break;
+
+            case CMD_FS_REMOVE_RECURSIVE:
+                {
+                    const char *path = (const char *)arg_buf;
+                    int err = recursive_remove(&lfs, path);
+                    if (err == LFS_ERR_NOENT) {
+                        resp_buf[0] = STATUS_NO_FILE;
+                    } else {
+                        resp_buf[0] = (err == 0) ? STATUS_OK : STATUS_ERR;
+                    }
+                    payload_len = 0;
+                }
+                break;
+
+            case CMD_FS_DELETE_CONTENTS:
+                {
+                    const char *path = (const char *)arg_buf;
+                    int err = delete_directory_contents(&lfs, path);
+                    if (err == LFS_ERR_NOENT) {
+                        resp_buf[0] = STATUS_NO_FILE;
+                    } else {
+                        resp_buf[0] = (err == 0) ? STATUS_OK : STATUS_ERR;
+                    }
+                    payload_len = 0;
+                }
+                break;
+
+            case CMD_FS_TREE:
+                {
+                    const char *path = (arg_len == 0) ? "/" : (const char *)arg_buf;
+
+                    if (stream_file_is_open) {
+                        lfs_file_close(&lfs, &stream_file);
+                        stream_file_is_open = false;
+                    }
+
+                    // Try to remove temp file first to ensure clean state
+                    lfs_remove(&lfs, "/tree.tmp");
+                    
+                    // Open temp file to store the tree output
+                    lfs_file_t tfile;
+                    int err = lfs_file_open(&lfs, &tfile, "/tree.tmp", LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+                    if (err < 0) {
+                        printf("TREE: Failed to open /tree.tmp for write (%d)\n", err);
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+                    
+                    generate_tree(&lfs, path, &tfile, 0);
+                    lfs_file_close(&lfs, &tfile);
+                    
+                    // Open for reading to stream back
+                    err = lfs_file_open(&lfs, &stream_file, "/tree.tmp", LFS_O_RDONLY);
+                    if (err < 0) {
+                         printf("TREE: Failed to open /tree.tmp for read (%d)\n", err);
+                         resp_buf[0] = STATUS_ERR;
+                         payload_len = 0;
+                         break;
+                    }
+                    
+                    lfs_soff_t size = lfs_file_size(&lfs, &stream_file);
+                    
+                    stream_file_is_open = true;
+                    // Send header (Status + Length)
+                    bus_write_byte(STATUS_OK);
+                    bus_write_byte(size & 0xFF);
+                    bus_write_byte((size >> 8) & 0xFF);
+                    
+                    stream_bytes_remaining = (uint16_t)size;
+                    current_state = STATE_LOADMEM_STREAM;
+                    savemem_buf_pos = 0;
+                    savemem_buf_fill = 0;
+                    
+                    bus_reset_handshake();
+                    continue; // Skip standard response
                 }
                 break;
 
@@ -634,7 +872,8 @@ int main() {
 
             case CMD_FS_OPEN:
                 {
-                    // Args: [Filename]
+                    // Args: [Filename] or [Filename]\0[Mode]
+                    // Mode: 0=RW/Create (Default), 1=RO
                     // Returns: [HandleID] [SizeLO] [SizeHI] [Size3] [Size4]
                     int handle = -1;
                     for (int i = 0; i < MAX_OPEN_FILES; i++) {
@@ -645,8 +884,17 @@ int main() {
                         resp_buf[0] = STATUS_ERR; // Too many open files
                     } else {
                         const char *path = (const char *)arg_buf;
-                        // Open for Read/Write, Create if missing
-                        int err = lfs_file_open(&lfs, &open_files[handle].file, path, LFS_O_RDWR | LFS_O_CREAT);
+                        int flags = LFS_O_RDWR | LFS_O_CREAT; // Default to Create/Write
+                        
+                        // Check for optional mode byte after filename null terminator
+                        size_t path_len = strlen(path);
+                        if (arg_len > path_len + 1) {
+                            if (arg_buf[path_len + 1] == 1) {
+                                flags = LFS_O_RDONLY;
+                            }
+                        }
+
+                        int err = lfs_file_open(&lfs, &open_files[handle].file, path, flags);
                         if (err) {
                             if (err == LFS_ERR_NOENT) {
                                 resp_buf[0] = STATUS_NO_FILE;
@@ -983,7 +1231,7 @@ int main() {
 
                     if (req.connected) {
                         char request[256];
-                        snprintf(request, sizeof(request), "GET %s HTTP/1.0\r\nHost: %s\r\n\r\n", remote_path, ip_str);
+                        snprintf(request, sizeof(request), "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: PicoDOS\r\n\r\n", remote_path, ip_str);
                         
                         cyw43_arch_lwip_begin();
                         tcp_write(pcb, request, strlen(request), TCP_WRITE_FLAG_COPY);
@@ -1075,7 +1323,7 @@ int main() {
                         // 3. Send Headers
                         char header[256];
                         snprintf(header, sizeof(header), 
-                            "POST %s HTTP/1.0\r\nHost: %s\r\nContent-Length: %ld\r\n\r\n", 
+                            "POST %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: PicoDOS\r\nContent-Length: %ld\r\n\r\n", 
                             remote_path, ip_str, file_size);
                         
                         cyw43_arch_lwip_begin();
@@ -1236,7 +1484,7 @@ int main() {
 
                     if (req.connected) {
                         char request[256];
-                        snprintf(request, sizeof(request), "GET %s HTTP/1.0\r\nHost: %s\r\n\r\n", remote_path_arg, FILE_SERVER_IP);
+                        snprintf(request, sizeof(request), "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: PicoDOS\r\n\r\n", remote_path_arg, FILE_SERVER_IP);
                         
                         cyw43_arch_lwip_begin();
                         tcp_write(pcb, request, strlen(request), TCP_WRITE_FLAG_COPY);
@@ -1307,6 +1555,11 @@ int main() {
 			    
 			    printf("SAVEMEM: File='%s', Length=%u\n", filename, length);
 			    
+			    if (stream_file_is_open) {
+			        lfs_file_close(&lfs, &stream_file);
+			        stream_file_is_open = false;
+			    }
+
 			    // Open file (create/overwrite)
 			    int err = lfs_file_open(&lfs, &stream_file, filename,
 			                           LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
@@ -1316,6 +1569,7 @@ int main() {
 			        bus_write_byte(0); bus_write_byte(0);
 			        break;
 			    }
+			    stream_file_is_open = true;
 			    
 			    // Send OK header (ready signal)
 			    bus_write_byte(STATUS_OK);
@@ -1349,6 +1603,11 @@ int main() {
 
                 printf("LOADMEM: File='%s'\n", filename);
 
+                if (stream_file_is_open) {
+                    lfs_file_close(&lfs, &stream_file);
+                    stream_file_is_open = false;
+                }
+
                 int err = lfs_file_open(&lfs, &stream_file, filename, LFS_O_RDONLY);
                 if (err < 0) {
                     printf("LOADMEM: File open failed, err=%d\n", err);
@@ -1360,6 +1619,7 @@ int main() {
                     bus_write_byte(0); bus_write_byte(0);
                     break;
                 }
+                stream_file_is_open = true;
 
                 lfs_soff_t size = lfs_file_size(&lfs, &stream_file);
                 if (size > 65535) size = 65535; // Cap at 64KB for 6502 safety
@@ -1379,20 +1639,6 @@ int main() {
                 bus_reset_handshake();
                 continue;
             }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
             default:
                 resp_buf[0] = STATUS_ERR;

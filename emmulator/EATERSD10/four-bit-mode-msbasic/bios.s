@@ -7,9 +7,15 @@
 READ_PTR:       .res 1
 WRITE_PTR:      .res 1
 
+; MSBASIC Zero Page Variables
+ZP_PTR      = $50
+ptr_temp    = $56
+
 .segment "INPUT_BUFFER"
 .export INPUT_BUFFER
 INPUT_BUFFER:   .res $100
+
+.include "common/pico_def.inc"
 
 
 .segment "BIOS"
@@ -18,6 +24,7 @@ ACIA_DATA       = $5000
 ACIA_STATUS     = $5001
 ACIA_CMD        = $5002
 ACIA_CTRL       = $5003
+SKIP_MOUNT_FLAG = $02   ; Flag set by Emulator if user skipped sync
 PORTA           = $6001
 DDRA            = $6003
 T1LL        = $6006
@@ -31,17 +38,431 @@ START:
         ;~ STA     ACIA_CTRL
         ;~ LDA     #$89            ; No parity, no echo, rx interrupts.
         ;~ STA     ACIA_CMD  
-        LDA #$1F        ; 8-N-1, 19200 bps
-        STA ACIA_CTRL
-        LDY #$8B
-        STY ACIA_CMD
-        JMP     RESET        
+        
+        ;LDA #$1F        ; 8-N-1, 19200 bps
+        ;STA ACIA_CTRL
+        ;LDY #$8B
+        ;STY ACIA_CMD    ; No parity, no echo, rx interrupts DISABLED.
+
+        ; Initialize Krusader variables (since we skip MAIN)
+        LDA #$03
+        STA z:CODEH
+        LDA #$20
+        STA z:SRCSTH
+        LDA #$7C
+        STA z:TABLEH
+
+        jsr pico_init
+        
+        ; Check if Emulator requested skip (Flag at $02)
+        lda SKIP_MOUNT_FLAG
+        bne @mount_skipped_by_user
+        
+        ; Attempt Mount
+        lda #CMD_FS_MOUNT
+        sta CMD_ID
+        lda #0
+        sta ARG_LEN
+        jsr pico_send_request
+        
+        ; After mount attempt, go to the shell
+        JMP DDOS_START
+
+@mount_skipped_by_user:
+        ; Print warning message
+        ldy #0
+@print_warning:
+        lda msg_skip_mount, y
+        beq @warning_done
+        jsr MONCOUT
+        iny
+        jmp @print_warning
+@warning_done:
+        JMP RESET   
+
+msg_skip_mount: .byte $0D, $0A, "Mount skipped. Shell requires a mounted chip.", $0D, $0A, 0
 
 LOAD:
-                rts
+    jsr PARSE_FILENAME_LITERAL
+    bcs @cancel
+    jsr PICO_LOAD
+@cancel:
+    rts
 
 SAVE:
-                rts
+    jsr PARSE_FILENAME_LITERAL
+    bcs @cancel
+    jsr PICO_SAVE
+@cancel:
+    rts
+
+; ---------------------------------------------------------------------------
+; PARSE_FILENAME_LITERAL
+; Parses a string literal "FILENAME" from BASIC text stream.
+; Stores in INPUT_BUFFER.
+; ---------------------------------------------------------------------------
+PARSE_FILENAME_LITERAL:
+    ; Skip spaces
+    ldy #0
+@skip_space:
+    lda (TXTPTR),y
+    cmp #$20
+    bne @check_quote
+    inc TXTPTR
+    bne @skip_space
+    inc TXTPTR+1
+    jmp @skip_space
+@check_quote:
+    cmp #'"'
+    bne @error
+    
+    inc TXTPTR
+    bne :+
+    inc TXTPTR+1
+:
+    ldx #0
+@loop:
+    lda (TXTPTR),y
+    cmp #'"'
+    beq @done
+    cmp #0
+    beq @error
+    sta INPUT_BUFFER,x
+    inx
+    inc TXTPTR
+    bne :+
+    inc TXTPTR+1
+:
+    jmp @loop
+@done:
+    lda #0
+    sta INPUT_BUFFER,x
+    
+    ; Skip closing quote
+    inc TXTPTR
+    bne :+
+    inc TXTPTR+1
+:
+    clc
+    rts
+@error:
+    sec
+    rts
+
+; ---------------------------------------------------------------------------
+; PICO_SAVE
+; Saves BASIC program from TXTTAB to VARTAB
+; ---------------------------------------------------------------------------
+PICO_SAVE:
+    ; Save ptr_temp as it is modified during save and BASIC might rely on it
+    lda ptr_temp
+    pha
+    lda ptr_temp+1
+    pha
+
+    ; Calculate Length = VARTAB - TXTTAB
+    sec
+    lda VARTAB
+    sbc TXTTAB
+    sta savemem_len
+    lda VARTAB+1
+    sbc TXTTAB+1
+    sta savemem_len+1
+
+    ; Prepare Command
+    lda #CMD_FS_SAVEMEM
+    sta CMD_ID
+
+    ; Copy Filename to ARG_BUFF
+    ldx #0
+@copy_name:
+    lda INPUT_BUFFER, x
+    sta ARG_BUFF, x
+    beq @name_done
+    inx
+    jmp @copy_name
+@name_done:
+    ; Append Length (Little Endian)
+    inx
+    lda savemem_len
+    sta ARG_BUFF, x
+    inx
+    lda savemem_len+1
+    sta ARG_BUFF, x
+    inx
+    stx ARG_LEN
+
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    bne @error_restore
+
+    ; Stream Data
+    lda TXTTAB
+    sta ptr_temp
+    lda TXTTAB+1
+    sta ptr_temp+1
+    
+    lda savemem_len
+    sta savemem_cnt
+    lda savemem_len+1
+    sta savemem_cnt+1
+
+    jsr common_write_stream_from_mem
+    
+    ; Read Final Status
+    lda #$00
+    sta DDRA
+    jsr read_byte
+    sta LAST_STATUS
+    jsr read_byte ; len_lo
+    jsr read_byte ; len_hi
+    lda #$FF
+    sta DDRA
+
+@error_restore:
+    pla
+    sta ptr_temp+1
+    pla
+    sta ptr_temp
+@error:
+    rts
+
+; ---------------------------------------------------------------------------
+; PICO_LOAD
+; Loads BASIC program to TXTTAB
+; ---------------------------------------------------------------------------
+PICO_LOAD:
+    lda #CMD_FS_LOADMEM
+    sta CMD_ID
+    
+    ldx #0
+@copy_name:
+    lda INPUT_BUFFER, x
+    sta ARG_BUFF, x
+    beq @name_done
+    inx
+    jmp @copy_name
+@name_done:
+    inx
+    stx ARG_LEN
+    
+    ; Send command manually to handle streaming response
+    lda #$FF
+    sta DDRA
+    lda CMD_ID
+    jsr send_byte
+    lda ARG_LEN
+    jsr send_byte
+    ldx #0
+@send_args:
+    lda ARG_BUFF, x
+    jsr send_byte
+    inx
+    cpx ARG_LEN
+    bne @send_args
+    
+    lda #$00
+    sta DDRA
+    
+    jsr read_byte ; Status
+    cmp #STATUS_OK
+    beq @ok
+    ; Error
+    jsr read_byte
+    jsr read_byte
+    lda #$FF
+    sta DDRA
+    rts
+@ok:
+    jsr read_byte ; Len Lo
+    sta savemem_len
+    jsr read_byte ; Len Hi
+    sta savemem_len+1
+    
+    ; Stream to TXTTAB
+    lda TXTTAB
+    sta ptr_temp
+    lda TXTTAB+1
+    sta ptr_temp+1
+    
+    lda savemem_len
+    sta savemem_cnt
+    lda savemem_len+1
+    sta savemem_cnt+1
+    
+    jsr common_read_stream_to_mem
+    
+    ; Update Pointers
+    clc
+    lda TXTTAB
+    adc savemem_len
+    sta VARTAB
+    sta ARYTAB
+    sta STREND
+    lda TXTTAB+1
+    adc savemem_len+1
+    sta VARTAB+1
+    sta ARYTAB+1
+    sta STREND+1
+    
+    lda #$FF
+    sta DDRA
+    rts
+
+; ---------------------------------------------------------------------------
+; KRUSADER EXTENSIONS
+; ---------------------------------------------------------------------------
+
+; Helper: Parse filename from Krusader ARGS+2 into ARG_BUFF
+; Returns Y = length (including null)
+PARSE_KRU_FILENAME:
+    ldx #2          ; Skip command char and space
+    ldy #0
+@loop:
+    lda z:ARGS, x
+    beq @done
+    cmp #$0D        ; CR
+    beq @done
+    sta ARG_BUFF, y
+    inx
+    iny
+    jmp @loop
+@done:
+    lda #0
+    sta ARG_BUFF, y
+    iny
+    sty ARG_LEN
+    rts
+
+EXT_SAVE_SRC:
+    jsr PARSE_KRU_FILENAME
+    
+    ; Calculate Source Size
+    ; Call TOEND to ensure pointers are at the end
+    jsr TOEND
+    
+    ; Length = CURLNL/H - SRCSTL/H
+    sec
+    lda z:CURLNL
+    sbc z:SRCSTL
+    sta savemem_len
+    lda z:CURLNH
+    sbc z:SRCSTH
+    sta savemem_len+1
+    
+    ; Prepare Command
+    lda #CMD_FS_SAVEMEM
+    sta CMD_ID
+    
+    ; Append Length to ARG_BUFF (after filename)
+    ldx ARG_LEN
+    lda savemem_len
+    sta ARG_BUFF, x
+    inx
+    lda savemem_len+1
+    sta ARG_BUFF, x
+    inx
+    stx ARG_LEN
+    
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    bne @error
+    
+    ; Stream Data from SRCSTL
+    lda z:SRCSTL
+    sta ptr_temp
+    lda z:SRCSTH
+    sta ptr_temp+1
+    
+    lda savemem_len
+    sta savemem_cnt
+    lda savemem_len+1
+    sta savemem_cnt+1
+    
+    jsr common_write_stream_from_mem
+    
+    ; Read Final Status
+    lda #$00
+    sta DDRA
+    jsr read_byte
+    sta LAST_STATUS
+    jsr read_byte ; len_lo
+    jsr read_byte ; len_hi
+    lda #$FF
+    sta DDRA
+@error:
+    rts
+
+EXT_LOAD_SRC:
+    jsr PARSE_KRU_FILENAME
+    
+    ; Load to SRCSTL
+    lda z:SRCSTL
+    sta ptr_temp
+    lda z:SRCSTH
+    sta ptr_temp+1
+    
+    jsr PICO_LOAD_RAW ; Reuse logic but for specific address
+    
+    ; Re-index Krusader lines
+    jsr TOEND
+    rts
+
+; Helper to load to ptr_temp without parsing filename from BASIC stream
+PICO_LOAD_RAW:
+    lda #CMD_FS_LOADMEM
+    sta CMD_ID
+    
+    ; ARG_BUFF already populated by PARSE_KRU_FILENAME
+    
+    ; Send command manually
+    lda #$FF
+    sta DDRA
+    lda CMD_ID
+    jsr send_byte
+    lda ARG_LEN
+    jsr send_byte
+    ldx #0
+@send_args:
+    lda ARG_BUFF, x
+    jsr send_byte
+    inx
+    cpx ARG_LEN
+    bne @send_args
+    
+    lda #$00
+    sta DDRA
+    
+    jsr read_byte ; Status
+    cmp #STATUS_OK
+    beq @ok
+    ; Error
+    jsr read_byte
+    jsr read_byte
+    lda #$FF
+    sta DDRA
+    rts
+@ok:
+    jsr read_byte ; Len Lo
+    sta savemem_len
+    jsr read_byte ; Len Hi
+    sta savemem_len+1
+    
+    ; Stream to ptr_temp (already set by caller)
+    lda savemem_len
+    sta savemem_cnt
+    lda savemem_len+1
+    sta savemem_cnt+1
+    
+    jsr common_read_stream_to_mem
+    
+    lda #$FF
+    sta DDRA
+    rts
 
 MON:
             LDA #$0D

@@ -13,13 +13,15 @@ PCR_CA2_LOW  = $CC      ; CA2 Output Low (Idle)
 PCR_CA2_HIGH = $CE      ; CA2 Output High (Data Ready / Ready to Receive)
 IFR_CA1_BIT  = $02      ; Bit 1 is CA1 interrupt flag
 
+pico_ptr     = $5E      ; ZP pointer for data transfer (Matches t_ptr_temp)
+
 .segment "BSS"
 CMD_ID:         .res 1
 ARG_LEN:        .res 1
 ARG_BUFF:       .res 256
 LAST_STATUS:    .res 1
 RESP_LEN:       .res 2
-RESP_BUFF:      .res 1024
+RESP_BUFF:      .res 1025 ; +1 for safety null terminator
 TEMP_LEN:       .res 2
 
 .segment "CODE"
@@ -197,11 +199,16 @@ pico_read_bytes:
     lda RESP_LEN+1
     sta TEMP_LEN+1
 
-    ldx #0
+    ; Setup pointer to RESP_BUFF
+    lda #<RESP_BUFF
+    sta pico_ptr
+    lda #>RESP_BUFF
+    sta pico_ptr+1
+
+    ldy #0
 @loop:
     jsr read_byte
-    sta RESP_BUFF, x
-    inx
+    sta (pico_ptr), y
 
     ; Decrement TEMP_LEN
     lda TEMP_LEN
@@ -210,7 +217,16 @@ pico_read_bytes:
 @dec_low:
     dec TEMP_LEN
 
+    ; Increment buffer pointer
+    iny
+    bne @no_inc
+    inc pico_ptr+1
+@no_inc:
     lda TEMP_LEN
     ora TEMP_LEN+1
     bne @loop
+
+    ; Null-terminate the buffer for safety
+    lda #0
+    sta (pico_ptr), y
     rts
