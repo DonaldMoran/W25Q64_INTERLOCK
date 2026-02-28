@@ -1,4 +1,4 @@
-; put.s - Upload a file to the configured file server
+; put.s - Full working PUT command for DDOS shell
 ; Location: 6502/ca65/commands/put/put.s
 
 ; ---------------------------------------------------------------------------
@@ -11,15 +11,13 @@
 ; System calls
 ; ---------------------------------------------------------------------------
 OUTCH = $FFEF    ; Print character in A
+OUTHEX = $FFDC   ; Print hex byte in A
 CRLF  = $FED1    ; Print CR/LF
 
 ; ---------------------------------------------------------------------------
-; Zero page (USE ONLY $58-$5F)
+; Zero page - Using shell's ptr_temp ($56-$57) which is saved/restored
 ; ---------------------------------------------------------------------------
-t_arg_ptr    = $58  ; 2 bytes - Argument pointer
-t_str_ptr1   = $5A  ; 2 bytes - String pointer 1
-t_str_ptr2   = $5C  ; 2 bytes - String pointer 2
-t_ptr_temp   = $5E  ; 2 bytes - Temporary pointer
+ptr_temp = $56   ; 2 bytes - Shell's temporary pointer (safe to use)
 
 ; ---------------------------------------------------------------------------
 ; Constants
@@ -37,18 +35,18 @@ STATUS_NO_FILE = $02
 INPUT_BUFFER  = $0300
 
 ; ---------------------------------------------------------------------------
-; HEADER - MUST be first
+; HEADER
 ; ---------------------------------------------------------------------------
 .segment "HEADER"
-    .word $0800        ; Load at $0800
+    .word $0800
 
 ; ---------------------------------------------------------------------------
-; CODE - Program starts here
+; CODE
 ; ---------------------------------------------------------------------------
 .segment "CODE"
 
 start:
-    ; ALWAYS preserve registers
+    ; Preserve registers
     php
     pha
     txa
@@ -56,131 +54,114 @@ start:
     tya
     pha
 
-    ; Save CWD pointer passed from shell in $5E/$5F
-    lda t_ptr_temp
+    ; Save CWD pointer from shell ($5E/$5F)
+    lda $5E
     sta cwd_ptr
-    lda t_ptr_temp+1
+    lda $5F
     sta cwd_ptr+1
 
-    ; 1. Parse Arguments
     ; -----------------------------------------------------------------------
-    ; Scan INPUT_BUFFER for the command name and skip it
+    ; 1. Parse Arguments - Handle "RUN /BIN/PUT.BIN filename" format
+    ; -----------------------------------------------------------------------
     ldx #0
-@scan_cmd:
-    lda INPUT_BUFFER, x
-    beq @go_usage       ; No args -> Usage
-    cmp #' '
-    beq @skip_spaces
-    inx
-    bne @scan_cmd
-@go_usage:
-    jmp @usage
-
-@skip_spaces:
-    inx
-    lda INPUT_BUFFER, x
-    beq @go_usage       ; Trailing spaces only -> Usage
-    cmp #' '
-    beq @skip_spaces
     
-    ; Found argument start at index X
-    ; Save pointer to argument in t_arg_ptr
-    txa
-    clc
-    adc #<INPUT_BUFFER
-    sta t_arg_ptr
-    lda #>INPUT_BUFFER
-    adc #0
-    sta t_arg_ptr+1
+    ; Skip first word (RUN)
+@skip_run:
+    lda INPUT_BUFFER, x
+    beq @goto_usage1
+    cmp #' '
+    beq @skip_run_space
+    inx
+    jmp @skip_run
+@goto_usage1:
+    jmp usage
     
-    ; Always skip the first argument (the executable path from RUN)
-
-    ; Skip this argument (the path)
+@skip_run_space:
+    inx
+    
+    ; Skip second word (/BIN/PUT.BIN)
 @skip_path:
-    iny
-    lda (t_arg_ptr), y
-    beq @go_usage       ; End of line -> Usage
+    lda INPUT_BUFFER, x
+    beq @goto_usage2
     cmp #' '
-    bne @skip_path
-
-@skip_spaces_2:
-    iny
-    lda (t_arg_ptr), y
-    beq @go_usage       ; End of line -> Usage
+    beq @skip_path_space
+    inx
+    jmp @skip_path
+@goto_usage2:
+    jmp usage
+    
+@skip_path_space:
+    inx
+    
+    ; Skip any spaces before filename
+@skip_spaces:
+    lda INPUT_BUFFER, x
+    beq @goto_usage3
     cmp #' '
-    beq @skip_spaces_2
-
-    ; Found real argument, update t_arg_ptr
-    tya
-    clc
-    adc t_arg_ptr
-    sta t_arg_ptr
-    bcc @args_found
-    inc t_arg_ptr+1
-
-@args_found:
-    ; 2. Read server.cfg
-    ; -----------------------------------------------------------------------
-    jsr read_server_config
-    bcc @cfg_ok
-    jmp done            ; Error printed in subroutine
-@cfg_ok:
-
-    ; 3. Verify Local File Exists
-    ; -----------------------------------------------------------------------
-    ; Copy local path to ARG_BUFF for STAT command
-    ; Check if path is absolute (starts with /)
+    bne @found_local
+    inx
+    jmp @skip_spaces
+@goto_usage3:
+    jmp usage
+    
+@found_local:
+    ; X now points to start of local filename
+    stx local_start
+    
+    ; Find end of local filename
     ldy #0
-    lda (t_arg_ptr), y
-    cmp #'/'
-    beq @is_absolute
-
-    ; Relative path: Copy CWD first
-    ldx #0
-    
-    ; Setup pointer to CWD
-    lda cwd_ptr
-    sta t_str_ptr2
-    lda cwd_ptr+1
-    sta t_str_ptr2+1
-
-@copy_cwd:
-    lda (t_str_ptr2), y
-    beq @cwd_done
-    sta ARG_BUFF, x
-    inx
-    iny
-    bne @copy_cwd
-@cwd_done:
-    ; Append '/' if not present (unless root)
-    cpx #1
-    beq @is_root ; If len is 1, it must be "/"
-    lda #'/'
-    sta ARG_BUFF, x
-    inx
-@is_root:
-    ; Now append the relative path
-    ldy #0 ; Reset Y for t_arg_ptr
-    jmp @copy_local_stat
-
-@is_absolute:
-    ldy #0
-    ldx #0
-@copy_local_stat:
-    lda (t_arg_ptr), y
-    beq @stat_done
+@find_local_end:
+    lda INPUT_BUFFER, x
+    beq @local_done
     cmp #' '
-    beq @stat_done
-    sta ARG_BUFF, x
+    beq @local_done
     inx
     iny
-    bne @copy_local_stat
-@stat_done:
-    stx ARG_LEN         ; Save length for later use? No, STAT needs it.
+    jmp @find_local_end
+@local_done:
+    sty local_len
     
-    ; Save length of local path for packet construction
-    stx t_ptr_temp
+    ; Check for remote filename argument
+    lda INPUT_BUFFER, x
+    beq @no_remote
+    inx
+    lda INPUT_BUFFER, x
+    beq @no_remote
+    cmp #' '
+    beq @no_remote
+    stx remote_start
     
+    ldy #0
+@find_remote_end:
+    lda INPUT_BUFFER, x
+    beq @remote_done
+    cmp #' '
+    beq @remote_done
+    inx
+    iny
+    jmp @find_remote_end
+@remote_done:
+    sty remote_len
+    jmp @args_parsed
+    
+@no_remote:
+    lda #0
+    sta remote_len
+    sta remote_start
+
+@args_parsed:
+
+    ; -----------------------------------------------------------------------
+    ; 2. Verify local file exists using CMD_FS_STAT
+    ; -----------------------------------------------------------------------
+    ldx #0
+    jsr resolve_local_path
+    lda #0
+    sta ARG_BUFF, x
+    inx
+    stx ARG_LEN
+    
+    ; Send STAT command
     lda #CMD_FS_STAT
     sta CMD_ID
     jsr pico_send_request
@@ -190,174 +171,249 @@ start:
     beq @file_exists
     
     lda #<msg_no_file
-    sta t_str_ptr1
+    sta ptr_temp
     lda #>msg_no_file
-    sta t_str_ptr1+1
+    sta ptr_temp+1
     jsr print_string
     jsr CRLF
     jmp done
 
 @file_exists:
-    ; 4. Build Request Packet in ARG_BUFF
-    ; Format: IP \0 Port \0 LocalPath \0 RemotePath
+
     ; -----------------------------------------------------------------------
+    ; 3. Read server.cfg
+    ; -----------------------------------------------------------------------
+    lda #CMD_FS_OPEN
+    sta CMD_ID
     
-    ; A. Copy IP
-    ldx #0              ; Target index in ARG_BUFF
-    ldy #0              ; Source index in server_cfg_data
+    ; Copy "/server.cfg" to ARG_BUFF
+    lda #'/'
+    sta ARG_BUFF
+    lda #'s'
+    sta ARG_BUFF+1
+    lda #'e'
+    sta ARG_BUFF+2
+    lda #'r'
+    sta ARG_BUFF+3
+    lda #'v'
+    sta ARG_BUFF+4
+    lda #'e'
+    sta ARG_BUFF+5
+    lda #'r'
+    sta ARG_BUFF+6
+    lda #'.'
+    sta ARG_BUFF+7
+    lda #'c'
+    sta ARG_BUFF+8
+    lda #'f'
+    sta ARG_BUFF+9
+    lda #'g'
+    sta ARG_BUFF+10
+    lda #0
+    sta ARG_BUFF+11
+    
+    lda #12
+    sta ARG_LEN
+    
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    beq @open_ok
+    
+    lda #<msg_no_cfg
+    sta ptr_temp
+    lda #>msg_no_cfg
+    sta ptr_temp+1
+    jsr print_string
+    jsr CRLF
+    jmp done
+
+@open_ok:
+    ; Save handle
+    lda RESP_BUFF
+    sta file_handle
+    
+    ; Read file
+    lda #CMD_FS_READ
+    sta CMD_ID
+    lda file_handle
+    sta ARG_BUFF
+    lda #32
+    sta ARG_BUFF+1
+    lda #0
+    sta ARG_BUFF+2
+    lda #3
+    sta ARG_LEN
+    
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    beq @read_ok
+    
+    lda #<msg_bad_cfg
+    sta ptr_temp
+    lda #>msg_bad_cfg
+    sta ptr_temp+1
+    jsr print_string
+    jsr CRLF
+    jmp close_file
+
+@read_ok:
+    ; Copy response to buffer
+    ldx #0
+@copy_resp:
+    cpx RESP_LEN
+    bcs @copy_done
+    lda RESP_BUFF, x
+    sta cfg_data, x
+    inx
+    jmp @copy_resp
+@copy_done:
+    lda #0
+    sta cfg_data, x
+    
+    ; Find colon and split
+    ldx #0
+@find_colon:
+    lda cfg_data, x
+    beq cfg_invalid
+    cmp #':'
+    beq colon_found
+    inx
+    jmp @find_colon
+    
+cfg_invalid:
+    jmp close_and_fail
+
+colon_found:
+    lda #0
+    sta cfg_data, x
+    stx cfg_ip_len
+    inx
+    stx cfg_port_start
+
+close_file:
+    ; Close file
+    lda #CMD_FS_CLOSE
+    sta CMD_ID
+    lda file_handle
+    sta ARG_BUFF
+    lda #1
+    sta ARG_LEN
+    jsr pico_send_request
+
+    ; -----------------------------------------------------------------------
+    ; 4. Build request packet in ARG_BUFF
+    ; Format: IP\0Port\0LocalPath\0RemotePath
+    ; -----------------------------------------------------------------------
+    ldx #0
+    
+    ; Copy IP
+    ldy #0
 @copy_ip:
-    lda server_cfg_data, y
-    beq @ip_done        ; Null terminator
+    lda cfg_data, y
+    beq @ip_done
     sta ARG_BUFF, x
     inx
     iny
-    bne @copy_ip
+    jmp @copy_ip
 @ip_done:
     lda #0
     sta ARG_BUFF, x
     inx
-    iny                 ; Skip the null in source
     
-    ; B. Copy Port
+    ; Copy Port
+    ldy cfg_port_start
 @copy_port:
-    lda server_cfg_data, y
+    lda cfg_data, y
     beq @port_done
     sta ARG_BUFF, x
     inx
     iny
-    bne @copy_port
+    jmp @copy_port
 @port_done:
     lda #0
     sta ARG_BUFF, x
     inx
     
-    ; C. Copy Local Path (from t_arg_ptr)
-    ldy #0
-    ; Check if path is absolute (starts with /)
-    lda (t_arg_ptr), y
-    cmp #'/'
-    beq @copy_local
-
-    ; Relative path: Copy CWD first
-    ; Save Y (index in t_arg_ptr)
-    sty t_ptr_temp
-
-    ; Setup pointer to CWD
-    lda cwd_ptr
-    sta t_str_ptr2
-    lda cwd_ptr+1
-    sta t_str_ptr2+1
-
-@copy_cwd_packet:
-    lda (t_str_ptr2), y
-    beq @cwd_packet_done
+    ; Copy Local Path
+    jsr resolve_local_path
+    lda #0
+    sta ARG_BUFF, x
+    inx
+    
+    ; Copy Remote Path
+    lda remote_len
+    beq @use_local_name
+    
+    ; Use provided remote path
+    ldy remote_start
+@copy_remote:
+    lda INPUT_BUFFER, y
+    beq @remote_done
+    cmp #' '
+    beq @remote_done
     sta ARG_BUFF, x
     inx
     iny
-    bne @copy_cwd_packet
-@cwd_packet_done:
-    ; Append '/' if not root
-    lda (t_str_ptr2)
-    cmp #'/'
-    bne @add_slash_packet
-    ldy #1
-    lda (t_str_ptr2), y
-    beq @restore_y_packet
-@add_slash_packet:
+    jmp @copy_remote
+@remote_done:
+    lda #0
+    sta ARG_BUFF, x
+    inx
+    jmp @packet_done
+
+@use_local_name:
+    ; Use filename from local path (basename), prepend /
     lda #'/'
     sta ARG_BUFF, x
     inx
-@restore_y_packet:
-    ldy t_ptr_temp ; Restore Y
 
-@copy_local:
-    lda (t_arg_ptr), y
-    beq @local_done
+    ; Find start of basename in INPUT_BUFFER
+    ldy local_start
+    sty ptr_temp ; Store start index
+    
+@find_basename:
+    lda INPUT_BUFFER, y
+    beq @basename_found
     cmp #' '
-    beq @local_done
-    sta ARG_BUFF, x
-    inx
-    iny
-    bne @copy_local
-@local_done:
-    lda #0
-    sta ARG_BUFF, x
-    inx
-    
-    ; Save Y (length of local path + offset) for remote path logic
-    sty t_ptr_temp
-    
-    ; D. Copy Remote Path
-    ; Check if a second argument exists
-    lda (t_arg_ptr), y
-    beq @use_local_as_remote ; End of string -> use local filename
-    
-    ; Skip spaces to find second arg
-@skip_spaces_3:
-    iny
-    lda (t_arg_ptr), y
-    beq @use_local_as_remote
-    cmp #' '
-    beq @skip_spaces_3
-    
-    ; Found second arg, copy it
-@copy_remote:
-    lda (t_arg_ptr), y
-    beq @remote_done
-    cmp #' '            ; Stop at space (ignore extra args)
-    beq @remote_done
-    sta ARG_BUFF, x
-    inx
-    iny
-    bne @copy_remote
-@remote_done:
-    jmp @finalize_packet
-
-@use_local_as_remote:
-    ; No remote path provided, use filename from local path
-    ; Find last '/' in local path
-    ; t_arg_ptr points to start of local path
-    ; t_ptr_temp holds length of local path (index where space/null was found)
-    
-    ldy t_ptr_temp      ; Start at end
-@find_slash:
-    dey
-    bmi @no_slash       ; Reached start, no slash
-    lda (t_arg_ptr), y
+    beq @basename_found
     cmp #'/'
-    bne @find_slash
-    
-    ; Found slash at Y. Filename starts at Y+1
+    bne @next_char
+    sty ptr_temp ; Found a slash, update start index
+    inc ptr_temp ; Point to char after slash
+@next_char:
     iny
-    jmp @copy_filename_portion
-    
-@no_slash:
-    ldy #0              ; Use full path
-    
-@copy_filename_portion:
-    ; Copy from (t_arg_ptr + Y) until space or null
-@copy_remote_loop:
-    lda (t_arg_ptr), y
-    beq @finalize_packet
+    jmp @find_basename
+
+@basename_found:
+    ldy ptr_temp
+@copy_basename:
+    lda INPUT_BUFFER, y
+    beq @remote_local_done
     cmp #' '
-    beq @finalize_packet
+    beq @remote_local_done
     sta ARG_BUFF, x
     inx
     iny
-    bne @copy_remote_loop
-
-@finalize_packet:
+    jmp @copy_basename
+@remote_local_done:
     lda #0
     sta ARG_BUFF, x
     inx
+
+@packet_done:
     stx ARG_LEN
 
-    ; 5. Send Command
+    ; -----------------------------------------------------------------------
+    ; 5. Send HTTP POST command
     ; -----------------------------------------------------------------------
     lda #<msg_uploading
-    sta t_str_ptr1
+    sta ptr_temp
     lda #>msg_uploading
-    sta t_str_ptr1+1
+    sta ptr_temp+1
     jsr print_string
     jsr CRLF
 
@@ -366,167 +422,34 @@ start:
     jsr pico_send_request
     
     lda LAST_STATUS
-    bne @net_error
+    bne @upload_failed
     
     lda #<msg_done
-    sta t_str_ptr1
+    sta ptr_temp
     lda #>msg_done
-    sta t_str_ptr1+1
+    sta ptr_temp+1
     jsr print_string
     jsr CRLF
     jmp done
 
-@net_error:
+@upload_failed:
     lda #<msg_err
-    sta t_str_ptr1
+    sta ptr_temp
     lda #>msg_err
-    sta t_str_ptr1+1
+    sta ptr_temp+1
     jsr print_string
     jsr CRLF
     jmp done
 
-@usage:
+usage:
     lda #<msg_usage
-    sta t_str_ptr1
+    sta ptr_temp
     lda #>msg_usage
-    sta t_str_ptr1+1
+    sta ptr_temp+1
     jsr print_string
     jsr CRLF
     jmp done
 
-; ---------------------------------------------------------------------------
-; Subroutine: Read server.cfg
-; Reads IP:Port into server_cfg_data and replaces ':' with 0
-; Returns: Carry Clear on success, Carry Set on error
-; ---------------------------------------------------------------------------
-read_server_config:
-    ; Open File
-    lda #CMD_FS_OPEN
-    sta CMD_ID
-    ldx #0
-@copy_fname:
-    lda filename_cfg, x
-    sta ARG_BUFF, x
-    beq @fname_done
-    inx
-    bne @copy_fname
-@fname_done:
-    stx ARG_LEN
-    jsr pico_send_request
-    
-    lda LAST_STATUS
-    cmp #STATUS_OK
-    beq @open_ok
-    
-    ; Error opening config
-    lda #<msg_no_cfg
-    sta t_str_ptr1
-    lda #>msg_no_cfg
-    sta t_str_ptr1+1
-    jsr print_string
-    jsr CRLF
-    sec
-    rts
-
-@open_ok:
-    lda RESP_BUFF       ; Handle
-    sta t_ptr_temp
-    
-    ; Read File
-    lda #CMD_FS_READ
-    sta CMD_ID
-    lda t_ptr_temp
-    sta ARG_BUFF
-    lda #32             ; Read up to 32 bytes
-    sta ARG_BUFF+1
-    lda #0
-    sta ARG_BUFF+2
-    lda #3
-    sta ARG_LEN
-    jsr pico_send_request
-
-    ; Check Read Status
-    lda LAST_STATUS
-    cmp #STATUS_OK
-    bne @close_and_fail
-    
-    ; Copy response to BSS buffer
-    ldx #0
-@copy_resp:
-    cpx RESP_LEN
-    bcs @copy_done
-    lda RESP_BUFF, x
-    sta server_cfg_data, x
-    inx
-    bne @copy_resp
-@copy_done:
-    lda #0
-    sta server_cfg_data, x ; Ensure null termination
-
-    ; Close File
-    lda #CMD_FS_CLOSE
-    sta CMD_ID
-    lda t_ptr_temp
-    sta ARG_BUFF
-    lda #1
-    sta ARG_LEN
-    jsr pico_send_request
-    
-    ; Find colon and replace with null
-    ldx #0
-@find_colon:
-    lda server_cfg_data, x
-    beq @cfg_invalid    ; End reached, no colon
-    cmp #':'
-    beq @found_colon
-    inx
-    bne @find_colon
-    
-@found_colon:
-    lda #0
-    sta server_cfg_data, x ; Split IP and Port
-    clc
-    rts
-@close_and_fail:
-    lda #CMD_FS_CLOSE
-    sta CMD_ID
-    lda t_ptr_temp
-    sta ARG_BUFF
-    lda #1
-    sta ARG_LEN
-    jsr pico_send_request
-@read_err:
-@cfg_invalid:
-    lda #<msg_bad_cfg
-    sta t_str_ptr1
-    lda #>msg_bad_cfg
-    sta t_str_ptr1+1
-    jsr print_string
-    jsr CRLF
-    sec
-    rts
-
-; ---------------------------------------------------------------------------
-; Helper: Print null-terminated string
-; ---------------------------------------------------------------------------
-print_string:
-    pha
-    phy
-    ldy #0
-@loop:
-    lda (t_str_ptr1), y
-    beq @done
-    jsr OUTCH
-    iny
-    jmp @loop
-@done:
-    ply
-    pla
-    rts
-
-; ---------------------------------------------------------------------------
-; Exit
-; ---------------------------------------------------------------------------
 done:
     pla
     tay
@@ -535,6 +458,87 @@ done:
     pla
     plp
     clc
+    rts
+
+close_and_fail:
+    lda #<msg_bad_cfg
+    sta ptr_temp
+    lda #>msg_bad_cfg
+    sta ptr_temp+1
+    jsr print_string
+    jsr CRLF
+    jmp close_file
+
+; ---------------------------------------------------------------------------
+; resolve_local_path
+; Copies local path from INPUT_BUFFER to ARG_BUFF at index X.
+; Resolves relative paths using CWD.
+; Updates X to point after the copied string.
+; ---------------------------------------------------------------------------
+resolve_local_path:
+    ldy local_start
+    lda INPUT_BUFFER, y
+    cmp #'/'
+    beq @copy_abs
+
+    ; Relative path - prepend CWD
+    lda cwd_ptr
+    sta ptr_temp
+    lda cwd_ptr+1
+    sta ptr_temp+1
+    
+    ldy #0
+@copy_cwd:
+    lda (ptr_temp), y
+    beq @cwd_done
+    sta ARG_BUFF, x
+    inx
+    iny
+    jmp @copy_cwd
+@cwd_done:
+    ; Add slash if needed (unless CWD is just "/")
+    ldy #0
+    lda (ptr_temp), y
+    cmp #'/'
+    bne @add_slash
+    ldy #1
+    lda (ptr_temp), y
+    beq @start_local ; CWD is "/", don't add another slash
+@add_slash:
+    lda #'/'
+    sta ARG_BUFF, x
+    inx
+
+@start_local:
+    ldy local_start
+@copy_abs:
+    lda INPUT_BUFFER, y
+    beq @done
+    cmp #' '
+    beq @done
+    sta ARG_BUFF, x
+    inx
+    iny
+    jmp @copy_abs
+@done:
+    rts
+
+; ---------------------------------------------------------------------------
+; Print string using ptr_temp ($56-$57)
+; ---------------------------------------------------------------------------
+print_string:
+    pha
+    phy
+    ldy #0
+@loop:
+    lda (ptr_temp), y
+    beq @done
+    jsr OUTCH
+    iny
+    jmp @loop
+@done:
+    ply
+    pla
     rts
 
 ; ---------------------------------------------------------------------------
@@ -552,9 +556,16 @@ msg_no_cfg:      .asciiz "Error: Run SETSERVER first"
 msg_bad_cfg:     .asciiz "Error: Invalid server.cfg"
 
 ; ---------------------------------------------------------------------------
-; BSS - Uninitialized Data
+; BSS
 ; ---------------------------------------------------------------------------
 .segment "BSS"
 
-server_cfg_data: .res 32  ; Buffer for IP:Port string
-cwd_ptr:         .res 2   ; Pointer to CWD string
+cwd_ptr:         .res 2   ; Saved CWD pointer
+file_handle:     .res 1   ; File handle for server.cfg
+cfg_data:        .res 32  ; Buffer for server.cfg contents
+cfg_ip_len:      .res 1   ; Length of IP part
+cfg_port_start:  .res 1   ; Start index of port
+local_start:     .res 1   ; Start of local path in INPUT_BUFFER
+local_len:       .res 1   ; Length of local path
+remote_start:    .res 1   ; Start of remote path (0 if none)
+remote_len:      .res 1   ; Length of remote path (0 if none)

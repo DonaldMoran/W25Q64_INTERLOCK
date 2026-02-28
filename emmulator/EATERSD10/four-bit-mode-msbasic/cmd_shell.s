@@ -23,7 +23,6 @@
     OUTCH        = $FFEF
     
     ; Hardware Definitions for RAM build
-    ACIA_DATA    = $5000
     
     ; Map system calls to local implementations
     CHRIN        = LOCAL_CHRIN
@@ -45,13 +44,20 @@
     RESET = $FF00
 .endif
 
+; Ensure ACIA_DATA is defined for direct hardware access (needed for non-echoing input)
+.ifndef ACIA_DATA
+    ACIA_DATA = $5000
+.endif
+
 ; --- Zero Page pointers for strcmp ---
 str_ptr1 = $52 ; 2 bytes
 str_ptr2 = $54 ; 2 bytes
 ; --- Zero Page pointers for argument parsing ---
 arg_ptr = $50 ; 2 bytes
 ; --- Temp pointer for general use ---
+.ifndef ptr_temp
 ptr_temp = $56 ; 2 bytes
+.endif
 
 .segment "BSS"
 current_path: .res 128 ; Buffer for the current working directory
@@ -189,9 +195,9 @@ shell_loop:
 
     ; --- Handle Backspace ---
     cmp #$08            ; Backspace character?
-    beq @do_backspace
+    beq @do_backspace8
     cmp #$7F            ; Or Delete character?
-    beq @do_backspace
+    beq @do_backspace7
 
     ; --- Filter out other control characters ---
     cmp #$20
@@ -206,7 +212,7 @@ shell_loop:
     inx
     jmp @read_loop
 
-@do_backspace:
+@do_backspace8:
     cpx #0              ; Is buffer empty?
     beq @read_loop      ; If so, do nothing (can't backspace past prompt)
 
@@ -215,12 +221,26 @@ shell_loop:
     ; 2. Visually erase character by printing Backspace-Space-Backspace.
     ; This moves the cursor left, overwrites the character with a space,
     ; and then moves the cursor left again to the correct final position.
-    lda #$08            ; Backspace
-    jsr OUTCH
     lda #' '            ; Space
     jsr OUTCH
     lda #$08            ; Backspace again
     jsr OUTCH
+    jmp @read_loop
+
+@do_backspace7:
+    cpx #0
+    beq @read_loop
+
+    dex                 ; Remove from buffer
+
+    ; Universal destructive backspace sequence
+    lda #$08            ; BS - move left
+    jsr OUTCH
+    lda #' '            ; Space - erase
+    jsr OUTCH
+    lda #$08            ; BS - move left again
+    jsr OUTCH
+
     jmp @read_loop
 
 @read_done:
@@ -616,7 +636,9 @@ do_dir:
     ; Argument provided: copy it to the Pico's argument buffer.
     ldx #0
     jsr resolve_path_to_arg_buff
-    bcs @dir_path_error
+    bcc @arg_resolved
+    jmp @dir_path_error
+@arg_resolved:
     
     lda #0
     sta ARG_BUFF, x
@@ -643,8 +665,8 @@ do_dir:
     rts
 @dir_success:
     jsr CRLF
-    ; Print the response string directly
-    ; (The Pico formats the list as a string)
+    ; Print the response string directly from the buffer.
+    ; Paging is handled by shell_outch inside print_response.
     jsr print_response
     rts
 
@@ -835,38 +857,6 @@ do_mkdir:
     jsr print_command_failed
     rts
 
-; do_del:
-;     jsr guard_requires_mount
-;     bcc @proceed
-;     rts
-; @proceed:
-
-;     ; For now, we assume the argument is an absolute path
-;     ; A real implementation would call resolve_path here.
-;     jsr get_first_arg_as_pico_arg
-
-;     lda #CMD_FS_REMOVE
-;     sta CMD_ID
-;     ; ARG_LEN is set by get_first_arg_as_pico_arg
-;     jsr pico_send_request
-;     bcc @del_ok
-;     jsr timeout_error
-;     rts
-
-; @del_ok:
-;     jsr get_first_arg
-;     lda LAST_STATUS
-;     cmp #STATUS_OK
-;     beq @del_success
-;     cmp #STATUS_NO_FILE
-;     bne @del_fail
-;     jsr print_file_not_found
-;     rts
-; @del_fail:
-;     jsr print_command_failed
-;     rts
-; @del_success:
-;     rts
 do_del:
     jsr guard_requires_mount
     bcc @proceed
@@ -1743,6 +1733,8 @@ common_transfer:
     inx
     cmp #'/'
     beq @find_filename
+    cpx #127            ; Check bounds before adding slash
+    bcs @path_overflow
     lda #'/'
     sta path_buf2, x
     inx
@@ -1770,11 +1762,15 @@ common_transfer:
 @copy_loop:
     lda path_buf1, y
     beq @copy_done
+    cpx #127            ; Check bounds before writing char
+    bcs @path_overflow
     sta path_buf2, x
     inx
     iny
     jmp @copy_loop
 @copy_done:
+    lda #0              ; Ensure null termination
+    sta path_buf2, x
     ; path_buf2 now holds the complete destination path
     jmp @not_dir_target ; Go to construct final args
 
@@ -1806,6 +1802,9 @@ common_transfer:
 @rename_success:
     clc
     rts
+
+@path_overflow:
+    jmp cmd_arg_error
 
 ; ---------------------------------------------------------------------------
 ; do_touch - Create an empty file
@@ -2275,11 +2274,13 @@ print_response:
     lda (str_ptr1), y
     jsr shell_outch
 
-    ; Increment Pointer
-    inc str_ptr1
-    bne @no_inc
+    ; Increment index. The original code incremented the base pointer while
+    ; keeping Y=0, which is functional but inefficient. This uses the more
+    ; idiomatic and efficient INY method, handling page crossings.
+    iny
+    bne @no_page_cross
     inc str_ptr1+1
-@no_inc:
+@no_page_cross:
 
     ; Decrement Length
     lda str_ptr2
@@ -2326,13 +2327,14 @@ print_string_raw:
 ; Paging Wrappers
 ; ---------------------------------------------------------------------------
 shell_outch:
-    cmp #$0A        ; Check for LF
-    bne @raw
     pha
-    jsr check_paging
+    jsr OUTCH
     pla
-@raw:
-    jmp OUTCH
+    cmp #$0A        ; Check for LF
+    bne @done
+    jsr check_paging
+@done:
+    rts
 
 shell_crlf:
     jsr CRLF
@@ -2521,25 +2523,6 @@ get_first_arg:
     adc #0
     sta arg_ptr+1
 @done:
-    rts
-
-; ---------------------------------------------------------------------------
-; get_first_arg_as_pico_arg
-; Copies the first argument from INPUT_BUFFER into ARG_BUFF for the pico.
-; Sets ARG_LEN.
-; ---------------------------------------------------------------------------
-get_first_arg_as_pico_arg:
-    jsr get_first_arg
-    ldy #0
-@copy_loop:
-    lda (arg_ptr), y
-    sta ARG_BUFF, y
-    beq @done
-    iny
-    jmp @copy_loop
-@done:
-    sty ARG_LEN      ; Set ARG_LEN to length of string (excluding null)
-    inc ARG_LEN      ; Add 1 for the null terminator
     rts
 
 ; ---------------------------------------------------------------------------
