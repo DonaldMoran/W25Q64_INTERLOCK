@@ -1541,15 +1541,15 @@ int main() {
 			    // Validate
 			    if (!fs_mounted) {
 			        printf("SAVEMEM: FS not mounted\n");
-			        bus_write_byte(STATUS_ERR);
-			        bus_write_byte(0); bus_write_byte(0);
+			        resp_buf[0] = STATUS_ERR;
+			        payload_len = 0;
 			        break;
 			    }
 			    
 			    if (length == 0 || length > 65535) {
 			        printf("SAVEMEM: Invalid length %d\n", length);
-			        bus_write_byte(STATUS_ERR);
-			        bus_write_byte(0); bus_write_byte(0);
+			        resp_buf[0] = STATUS_ERR;
+			        payload_len = 0;
 			        break;
 			    }
 			    
@@ -1565,8 +1565,12 @@ int main() {
 			                           LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
 			    if (err < 0) {
 			        printf("SAVEMEM: File open failed, err=%d\n", err);
-			        bus_write_byte(STATUS_ERR);
-			        bus_write_byte(0); bus_write_byte(0);
+			        if (err == LFS_ERR_NOENT) {
+			            resp_buf[0] = STATUS_NO_FILE;
+			        } else {
+			            resp_buf[0] = STATUS_ERR;
+			        }
+			        payload_len = 0;
 			        break;
 			    }
 			    stream_file_is_open = true;
@@ -1596,8 +1600,8 @@ int main() {
                 
                 if (!fs_mounted) {
                     printf("LOADMEM: FS not mounted\n");
-                    bus_write_byte(STATUS_ERR);
-                    bus_write_byte(0); bus_write_byte(0);
+                    resp_buf[0] = STATUS_ERR;
+                    payload_len = 0;
                     break;
                 }
 
@@ -1612,11 +1616,11 @@ int main() {
                 if (err < 0) {
                     printf("LOADMEM: File open failed, err=%d\n", err);
                     if (err == LFS_ERR_NOENT) {
-                        bus_write_byte(STATUS_NO_FILE);
+                        resp_buf[0] = STATUS_NO_FILE;
                     } else {
-                        bus_write_byte(STATUS_ERR);
+                        resp_buf[0] = STATUS_ERR;
                     }
-                    bus_write_byte(0); bus_write_byte(0);
+                    payload_len = 0;
                     break;
                 }
                 stream_file_is_open = true;

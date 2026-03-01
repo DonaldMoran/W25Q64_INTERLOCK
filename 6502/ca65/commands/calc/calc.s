@@ -445,20 +445,32 @@ math_eval:
     sta INPUT_BUFFER, x
     jsr print_crlf
     
-    ; Now parse the expression
+    ; Initialize variables
     ldx #0
     lda #0
     sta math_num1_lo
     sta math_num1_hi
     sta math_num2_lo
     sta math_num2_hi
+    sta math_operator
     
     ; Parse first number
 @parse_first:
     lda INPUT_BUFFER, x
-    bne @check_operator
+    beq @invalid_expr_branch1
+    jmp @continue_parse1
+@invalid_expr_branch1:
     jmp @invalid_expr
-@check_operator:
+@continue_parse1:
+    
+@parse_first_loop:
+    lda INPUT_BUFFER, x
+    beq @invalid_expr_branch2
+    jmp @continue_parse2
+@invalid_expr_branch2:
+    jmp @invalid_expr
+@continue_parse2:
+    
     cmp #'+'
     beq @got_operator
     cmp #'-'
@@ -470,8 +482,21 @@ math_eval:
     
     ; It's a digit - convert and add to first number
     sec
-    sbc #'0'
-    pha
+    sbc #'0'            ; Convert ASCII to value
+    bmi @invalid_expr_branch3
+    jmp @continue_parse3
+@invalid_expr_branch3:
+    jmp @invalid_expr
+@continue_parse3:
+    
+    cmp #10
+    bcs @invalid_expr_branch4
+    jmp @continue_parse4
+@invalid_expr_branch4:
+    jmp @invalid_expr
+@continue_parse4:
+    
+    pha                 ; Save digit
     
     ; Multiply current first number by 10
     lda math_num1_lo
@@ -484,29 +509,49 @@ math_eval:
     ; Add new digit
     pla
     clc
-    adc math_num1_lo
+    adc temp1
     sta math_num1_lo
-    lda math_num1_hi
+    lda temp1+1
     adc #0
     sta math_num1_hi
     bcs @overflow_long
     
     inx
-    jmp @parse_first
+    jmp @parse_first_loop
 
 @got_operator:
     sta math_operator
-    inx
-    jmp @parse_second
-
-@parse_second:
+    inx                 ; Move past operator
+    
+    ; Parse second number
     lda INPUT_BUFFER, x
-    beq @calculate_long
+    beq @invalid_expr_branch5
+    jmp @continue_parse5
+@invalid_expr_branch5:
+    jmp @invalid_expr
+@continue_parse5:
+    
+@parse_second_loop:
+    lda INPUT_BUFFER, x
+    beq @calculate       ; End of string, go calculate
     
     ; It's a digit - convert and add to second number
     sec
-    sbc #'0'
-    pha
+    sbc #'0'            ; Convert ASCII to value
+    bmi @invalid_expr_branch6
+    jmp @continue_parse6
+@invalid_expr_branch6:
+    jmp @invalid_expr
+@continue_parse6:
+    
+    cmp #10
+    bcs @invalid_expr_branch7
+    jmp @continue_parse7
+@invalid_expr_branch7:
+    jmp @invalid_expr
+@continue_parse7:
+    
+    pha                 ; Save digit
     
     ; Multiply current second number by 10
     lda math_num2_lo
@@ -519,15 +564,15 @@ math_eval:
     ; Add new digit
     pla
     clc
-    adc math_num2_lo
+    adc temp1
     sta math_num2_lo
-    lda math_num2_hi
+    lda temp1+1
     adc #0
     sta math_num2_hi
     bcs @overflow_long
     
     inx
-    jmp @parse_second
+    jmp @parse_second_loop
 
 @calculate_long:
     jmp @calculate
@@ -556,7 +601,9 @@ math_eval:
     lda math_num1_hi
     adc math_num2_hi
     sta temp1+1
-    bcs @overflow_long
+    bcc @no_overflow
+    jmp @overflow       ; Jump directly to overflow handler
+@no_overflow:    
     jmp @show_result
 
 @subtract:
@@ -567,7 +614,9 @@ math_eval:
     lda math_num1_hi
     sbc math_num2_hi
     sta temp1+1
-    bcc @negative_long
+    bcs @not_negative
+    jmp @negative       ; If borrow after high byte, result is negative
+@not_negative:    
     jmp @show_result
 
 @multiply:
@@ -583,7 +632,7 @@ math_eval:
 @mult_loop:
     lda temp2
     ora temp2+1
-    beq @show_result_long
+    beq @show_result
     clc
     lda temp1
     adc math_num1_lo
@@ -591,7 +640,9 @@ math_eval:
     lda temp1+1
     adc math_num1_hi
     sta temp1+1
-    bcs @overflow_long
+    bcc @not_an_overflow
+    jmp @overflow       ; Jump directly to overflow handler
+@not_an_overflow:    
     sec
     lda temp2
     sbc #1
@@ -605,36 +656,48 @@ math_eval:
     ; Check for division by zero
     lda math_num2_lo
     ora math_num2_hi
-    beq @div_zero_long
-
-@negative_long:
-    jmp @negative
-
-@show_result_long:
-    jmp @show_result
-
-@div_zero_long:
+    bne @not_divide_zero
     jmp @div_zero
-    
+
+@not_divide_zero:
     ; Simple division by repeated subtraction
     lda #0
-    sta temp1
+    sta temp1          ; Initialize quotient to 0
     sta temp1+1
+    
+    ; Copy dividend (num1) to temp2 for subtraction
     lda math_num1_lo
     sta temp2
     lda math_num1_hi
     sta temp2+1
     
 @div_loop:
+    ; Compare temp2 (remainder) with divisor
+    ; We want to check if temp2 >= divisor
+    
+    ; First compare high bytes
+    lda temp2+1
+    cmp math_num2_hi
+    bcc @show_result     ; If high byte less, we're done (temp2 < divisor)
+    bne @do_subtract     ; If high byte greater, definitely subtract
+    
+    ; High bytes equal, compare low bytes
+    lda temp2
+    cmp math_num2_lo
+    bcc @show_result     ; If low byte less, we're done (temp2 < divisor)
+    ; If low byte greater or equal, fall through to subtract
+    
+@do_subtract:
+    ; Subtract divisor from temp2
     sec
     lda temp2
     sbc math_num2_lo
-    tay
+    sta temp2
     lda temp2+1
     sbc math_num2_hi
-    bcc @show_result
     sta temp2+1
-    sty temp2
+    
+    ; Increment quotient
     inc temp1
     bne @div_loop
     inc temp1+1

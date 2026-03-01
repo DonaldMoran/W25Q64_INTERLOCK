@@ -196,7 +196,7 @@ PICO_SAVE:
     
     lda LAST_STATUS
     cmp #STATUS_OK
-    bne @error_restore
+    bne @error_restore_msg
 
     ; Stream Data
     lda TXTTAB
@@ -220,7 +220,15 @@ PICO_SAVE:
     jsr read_byte ; len_hi
     lda #$FF
     sta DDRA
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    bne @error_restore_msg
+    
+    jmp @error_restore
 
+@error_restore_msg:
+    jsr PRINT_MSG_ERR
 @error_restore:
     pla
     sta ptr_temp+1
@@ -274,6 +282,7 @@ PICO_LOAD:
     jsr read_byte
     lda #$FF
     sta DDRA
+    jsr PRINT_MSG_ERR
     rts
 @ok:
     jsr read_byte ; Len Lo
@@ -370,7 +379,7 @@ EXT_SAVE_SRC:
     
     lda LAST_STATUS
     cmp #STATUS_OK
-    bne @error
+    bne @error_msg
     
     ; Stream Data from SRCSTL
     lda z:SRCSTL
@@ -394,6 +403,15 @@ EXT_SAVE_SRC:
     jsr read_byte ; len_hi
     lda #$FF
     sta DDRA
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    bne @error_msg
+    
+    jsr PRINT_MSG_OK
+    rts
+@error_msg:
+    jsr PRINT_MSG_ERR
 @error:
     rts
 
@@ -445,6 +463,7 @@ PICO_LOAD_RAW:
     jsr read_byte
     lda #$FF
     sta DDRA
+    jsr PRINT_MSG_ERR
     rts
 @ok:
     jsr read_byte ; Len Lo
@@ -462,6 +481,7 @@ PICO_LOAD_RAW:
     
     lda #$FF
     sta DDRA
+    jsr PRINT_MSG_OK
     rts
 
 MON:
@@ -566,6 +586,42 @@ BUFFER_SIZE:
                 sbc READ_PTR
                 rts
 
+PRINT_MSG_OK:
+    ldy #0
+@loop_ok:
+    lda msg_ok, y
+    beq @done_ok
+    jsr MONCOUT
+    iny
+    jmp @loop_ok
+@done_ok:
+    rts
+
+PRINT_MSG_ERR:
+    lda LAST_STATUS
+    cmp #STATUS_NO_FILE
+    beq @print_no_file
+
+    ldy #0
+@loop_err:
+    lda msg_err, y
+    beq @done_msg
+    jsr MONCOUT
+    iny
+    jmp @loop_err
+
+@print_no_file:
+    ldy #0
+@loop_nf:
+    lda msg_no_file, y
+    beq @done_msg
+    jsr MONCOUT
+    iny
+    jmp @loop_nf
+
+@done_msg:
+    rts
+
 
 ; Interrupt request handler
 ;  What is Good
@@ -632,6 +688,13 @@ IRQ_HANDLER:
                 plx
                 pla
                 rti
+
+; ---------------------------------------------------------------------------
+; FEEDBACK MESSAGES
+; ---------------------------------------------------------------------------
+msg_ok:  .byte $0D, $0A, "OK", $0D, $0A, 0
+msg_err: .byte $0D, $0A, "ERR", $0D, $0A, 0
+msg_no_file: .byte $0D, $0A, "BAD PATH/FILE", $0D, $0A, 0
 
 .include "Krusader_1.3_65C02.asm"
 .include "cmd_shell.s"

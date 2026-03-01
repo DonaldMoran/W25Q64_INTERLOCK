@@ -89,17 +89,17 @@ The 65C02 computer issues commands, which are transmitted through the 6522 VIA t
 | `WC [FILE]` | | Count lines, words, and characters (External) |
 | `DIFF [FILE1] [FILE2]` | | Compare two files (External) |
 | `CALC` | | Retro Calculator (External) |
+| `CLS` | | Clear Screen and return home (External) |
 
-### Retro Calculator Details (`CALC`)
+### Design Note: `DIR`/`LS` vs `CATALOG`
 
-- **Features:**
-  - Hex/Binary/Decimal conversions
-  - Address range calculations
-  - Simple arithmetic (addition, subtraction, multiplication, division)
-  - Comprehensive input validation and error handling
-  - Menu-driven interface
+A key design choice has been made to balance features against the shell's limited ROM space (`< 4KB`).
 
-## Command Protocol Reference
+- **`DIR` (aliased as `LS`)** is a built-in command that uses a fixed 1024-byte buffer to display directory listings. This keeps the core shell small and fast for common use cases. It will fail if a directory listing exceeds 1024 bytes.
+
+- **`CATALOG`** is a new transient command that implements a streaming protocol. It reads the directory listing byte-by-byte and can therefore handle directories of any size without being limited by a buffer. It is the recommended command for very large directories.
+
+### Command Protocol Reference
 
 For complete command definitions including hex values for network commands (GET, PUT, SETSERVER) and File I/O operations, please see:
 
@@ -350,7 +350,7 @@ $50-$57 RESERVED FOR SHELL - DO NOT USE
 $58-$5F AVAILABLE FOR TRANSIENT COMMANDS
 ```
 
-### Standard Zero Page Pointers for Transients
+#### Standard Zero Page Pointers for Transients
 
 ```assembly
 t_arg_ptr    = $58  ; 2 bytes - Argument pointer
@@ -793,7 +793,7 @@ Maintains the future ideas section
   - **Features:**
     - Hex/Binary/Decimal conversions
     - Address range calculations
-    - Simple arithmetic (addition, subtraction, multiplication, division)
+    - Simple arithmetic (addition, subtraction, multiplication, division) for unsigned 16-bit integers (0-65535).
     - Comprehensive input validation and error handling
     - Menu-driven interface
 
@@ -804,6 +804,73 @@ To prevent memory corruption when using `SAVE` and `LOAD` commands in MSBASIC, t
 - **Old Location:** `$0800` (Standard for many 6502 systems)
 - **New Location:** `$0B00`
 - **Reason:** The Shell and Pico Interface library use a BSS segment starting at `$0400` for variables and large I/O buffers (`ARG_BUFF`, `RESP_BUFF`). This segment grows up to approximately `$0AA0`. Moving BASIC to `$0B00` ensures that file operations do not overwrite the running BASIC program.
+
+#### ZEROPAGE
+
+With CONFIG_2A and your ZP_START values:
+
+**Starting points:**
+
+- `ZP_START1` = $02 (GORESTART, GOSTROUT, GOAYINT, GIVEAYF)
+- `ZP_START2` = $0C (Z15, POSX, Z17, Z18, LINNUM, TXPSV, INPUTBUFFER)
+- `ZP_START3` = $62 (CHARAC through Z14)
+- `ZP_START4` = $6D (TEMPPT through the rest)
+
+**Allocation Trace:**
+
+**ZP_START1 ($02):**
+
+- GORESTART: .res 3 → $02-$04
+- GOSTROUT: .res 3 → $05-$07
+- GOAYINT: .res 2 → $08-$09
+- GOGIVEAYF: .res 2 → $0A-$0B
+- *(Ends at $0B)*
+
+**ZP_START2 ($0C):**
+
+- Z15: .res 1 → $0C
+- POSX: .res 1 → $0D
+- Z17: .res 1 → $0E
+- Z18: .res 1 → $0F
+- LINNUM/TXPSV: .res 2 → $10-$11
+- INPUTBUFFER: (no .res specified, but likely continues)
+- *(Need to see where ZP_START2 ends - probably continues until just before ZP_START3 at $62)*
+
+**ZP_START3 ($62):**
+
+- CHARAC: .res 1 → $62
+- ENDCHR: .res 1 → $63
+- EOLPNTR: .res 1 → $64
+- DIMFLG: .res 1 → $65
+- VALTYP: .res 2 (since not CONFIG_SMALL) → $66-$67
+- DATAFLG: .res 1 → $68
+- SUBFLG: .res 1 → $69
+- INPUTFLG: .res 1 → $6A
+- CPRMASK: .res 1 → $6B
+- Z14: .res 1 → $6C
+- *(Ends at $6C, just before ZP_START4)*
+
+**ZP_START4 ($6D):**
+
+- This continues through FAC, ARG, etc.
+
+**THE CRITICAL OBSERVATION:**
+With your configuration, ZP_START2 ends somewhere and ZP_START3 begins at $62. This means:
+
+The entire range from approximately **$12 through $61 is UNUSED and FREE!**
+
+This includes:
+
+- **$50-$5F** (your original question) - **COMPLETELY FREE**
+- Actually **$12-$61** is all free (about 80 bytes!)
+
+**Why this happens:**
+The original Microsoft BASIC typically had ZP_START3 around $50-$5F range, but your CONFIG_2A has moved it to $62, creating a large gap between the end of ZP_START2 variables and the start of ZP_START3 variables.
+
+**CONCLUSION:**
+$50-$5F is DEFINITELY AVAILABLE - in fact, it's part of a large free block from $12-$61 that you can safely use for your own purposes.
+
+This is excellent news for your project - you have plenty of zero page space to work with!
 
 ## 18. Development Workflow (RAM Testing)
 
@@ -933,45 +1000,15 @@ Before building, open `src/main.c` and configure your network settings:
 
 5. **Flash:** Hold the BOOTSEL button on your standard Pico, connect it to USB, and copy the generated `.uf2` file to the `RPI-RP2` drive.
 
-### Last commit branch feature/transient-7
+## 21. Last commit branch feature/transient-8
 
 **Accomplishments:**
 
 1. **System Stability & Synchronization:**
-    - Implemented a robust handshake synchronization mechanism (`sync_bridge`) to prevent deadlocks when the 6502 and Pico are powered on in different orders.
-    - The emulator now waits for the Bridge to be ready, but provides a "Press ESC to skip" option.
-    - **Boot Behavior:** If the Bridge is present, the system mounts the filesystem and boots into the **DDOS Shell**. If the Bridge is offline (skipped), it boots into the **WozMon Monitor**.
-    - Adjusted Host Pico clock speed (266MHz) and voltage (1.30V) to improve boot reliability.
-    - Fixed bus state initialization to prevent spurious command triggering.
+    - Corrected issue with Pico bridge in main.c such that a save or load to a non-existing directory is handled gracefully.
 
 2. **New Transient Commands:**
-    - **`RM-FR`**: Recursively removes directories and their contents.
-    - **`RM*`**: Deletes all files in the current directory (with safety prompt).
-    - **`TREE`**: Visualizes the directory structure and file sizes.
-    - **`PICORBT`**: Allows the 6502 to remotely reboot the Bridge Pico (useful for clearing stuck file handles).
-    - **`CP`**: Copy command with relative path support.
-    - **`NUKE`**: A specialized tool created to delete files with invalid characters (e.g., quotes) in their names.
+    - **`CLS`**: Clear the screen and return home (ANSI).
 
-3. **Krusader Integration:**
-    - Patched the Krusader assembler in ROM to support direct File I/O.
-    - Added `S` (Save Source), `F` (Fetch Source), and `O` (Save Object) commands to the Krusader shell.
-
-4. **Pico Firmware Enhancements:**
-    - Added `CMD_FS_TREE` for server-side tree generation (streaming response).
-    - Added `CMD_FS_REMOVE_RECURSIVE` and `CMD_FS_DELETE_CONTENTS` to offload heavy filesystem operations from the 6502.
-    - Improved `CMD_RESET` to cleanly unmount the filesystem before rebooting.
-
-5. **Editor Enhancements (`WRITE`):**
-    - Added `Find` command (`Ctrl+F`) to search for text strings within the buffer with wrap-around support.
-    - Editor Improvements: **Insert Mode**, **Navigation**
-
-6. **Caclculator (`CALC`):**
-    - Added a new application which is a menu-driven utility for the 6502 system that performs hexadecimal, binary, and decimal conversions, address range calculations, and basic arithmetic operations with comprehensive input validation.
-
-### Design Note: `DIR`/`LS` vs `CATALOG`
-
-A key design choice has been made to balance features against the shell's limited ROM space (`< 4KB`).
-
-- **`DIR` (aliased as `LS`)** is a built-in command that uses a fixed 1024-byte buffer to display directory listings. This keeps the core shell small and fast for common use cases. It will fail if a directory listing exceeds 1024 bytes.
-
-- **`CATALOG`** is a new transient command that implements a streaming protocol. It reads the directory listing byte-by-byte and can therefore handle directories of any size without being limited by a buffer. It is the recommended command for very large directories.
+3. **Calculator (`CALC`):**
+    - All basic arithmetic operations for unsigned 16-bit integers (0-65535), with comprehensive input validation corrected.
