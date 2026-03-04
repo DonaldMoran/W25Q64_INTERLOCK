@@ -15,7 +15,6 @@
 OUTCH = $FFEF    ; Print character in A
 ACIA_DATA = $5000
 
-
 INPUT_BUFFER   = $0300
 
 ; ---------------------------------------------------------------------------
@@ -57,11 +56,30 @@ start:
     lda t_ptr_temp+1
     sta cwd_ptr+1
 
+    ; --- Screen Size Detection ---
+    jsr detect_screen_size
+    bcc @size_detected ; Success (Carry Clear)
+
+    ; Fallback to default if detection fails
+    lda #24
+    sta screen_rows
+
+@size_detected:
+    ; Calculate viewport height from screen_rows
+    lda screen_rows
+    sec
+    sbc #5 ; 3 header lines, 1 prompt, 1 footer
+    sta viewport_height
+
     ; Initialize text buffer pointer to start of FIXED buffer
     lda #<text_buffer_fixed
     sta t_str_ptr1
     lda #>text_buffer_fixed
     sta t_str_ptr1+1
+    
+    ; Initialize top line to 1
+    lda #1
+    sta top_line_num
     
     ; Clear the entire buffer at startup
     lda #<text_buffer_fixed
@@ -89,8 +107,12 @@ start:
     ; Parse Filename Argument
     jsr parse_filename
     
-    ; Initialize UI
-    jsr init_ui
+    ; Try to load file if filename provided
+    jsr try_load_file
+    
+    ; Initialize UI and draw content
+    jsr calc_line_col
+    jsr redraw_screen
     
     ; --- Editor Loop ---
 editor_loop:
@@ -107,6 +129,10 @@ editor_loop:
     bne @check_find
     jmp exit_check
 @check_find:
+    cmp #$0F ; Ctrl+O (Save As)
+    bne @check_find_next
+    jmp handle_save_as
+@check_find_next:
     cmp #$06 ; Ctrl+F
     bne @check_bs
     jmp handle_find
@@ -136,7 +162,10 @@ editor_loop:
 
     ; Printable Char (0x20-0x7E)
     jsr insert_and_redraw_char
-    jmp loop_continue
+    ; Optimization: Skip full recalc for simple typing to reduce delay
+    inc current_col
+    jsr update_header_line_col
+    jmp editor_loop
 handle_escape:
     ; Handle escape sequences (arrow keys, etc.)
     jsr CHRIN  ; Get next character (usually '[')
@@ -325,18 +354,31 @@ handle_pgdn:
     ldy #0
     lda (t_str_ptr1), y
     beq @done ; EOF
-    cmp #$0A
-    beq @found_nl
+    cmp #$0A ; LF
+    beq @found_lf
     cmp #$0D
-    beq @found_nl
+    beq @found_cr
     
     inc t_str_ptr1
     bne @char_loop
     inc t_str_ptr1+1
     jmp @char_loop
 
-@found_nl:
-    ; Skip the newline char to start of next line
+@found_cr:
+    ; Found CR, skip it
+    inc t_str_ptr1
+    bne @check_lf
+    inc t_str_ptr1+1
+@check_lf:
+    ; Check for following LF
+    ldy #0
+    lda (t_str_ptr1), y
+    cmp #$0A
+    bne @check_count ; Just CR
+    ; Fall through to skip LF
+
+@found_lf:
+    ; Found LF (or LF after CR), skip it
     inc t_str_ptr1
     bne @check_count
     inc t_str_ptr1+1
@@ -401,11 +443,6 @@ handle_down_arrow:
     jsr inc_str_ptr1
 
 @next_line:
-    ; Check if we hit EOF immediately (empty last line?)
-    ldy #0
-    lda (t_str_ptr1), y
-    beq @done
-    
     jsr apply_column
     
     lda #<ansi_down
@@ -572,13 +609,29 @@ handle_bs:
 ; by shifting the remainder of the text buffer one byte to the left.
 ;---------------------------------------------------------------------------
 handle_del_char:
-    ; 1. Check if we are at the end of the text (cursor is on the null terminator).
-    ;    If so, there is nothing to delete.
+    ; 1. Check if at end of text
     ldy #0
     lda (t_str_ptr1), y
     beq @del_done ; Nothing to delete, just return to loop
 
-    ; 2. Shift buffer contents left by one, starting from the cursor position.
+    ; 2. Check if char is Newline ($0A)
+    cmp #$0A
+    beq @del_newline
+
+    ; 3. Normal char deletion (shift and redraw line only)
+    jsr shift_buffer_left
+    jsr redraw_line_from_cursor
+    jmp loop_continue
+
+@del_newline:
+    ; 4. Newline deletion (shift and redraw screen because lines merge)
+    jsr shift_buffer_left
+    jsr redraw_screen
+    jmp loop_continue
+@del_done:
+    jmp loop_continue
+
+shift_buffer_left:
     ;    DST = t_ptr_temp (set to current cursor position)
     ;    SRC = t_str_ptr2 (set to one position after cursor)
     lda t_str_ptr1
@@ -610,11 +663,8 @@ handle_del_char:
     inc t_str_ptr2+1
 @no_inc_src:
     jmp @shift_loop
-
 @shift_done:
-    jsr redraw_screen
-@del_done:
-    jmp loop_continue
+    rts
 
 handle_enter:
     lda #$0A             ; Line Feed
@@ -767,8 +817,80 @@ check_match:
     rts
 
 loop_continue:
-    jsr update_status_bar
+    ; Calculate current line/col
+    jsr calc_line_col
+    
+    ; Check if we need to scroll
+    jsr check_scroll
+    bcc @no_scroll
+    
+    ; Scroll needed
+    jsr redraw_screen
     jmp editor_loop
+@no_scroll:
+    jsr update_header_line_col
+    jmp editor_loop
+
+; ---------------------------------------------------------------------------
+; handle_save_as: Prompt for filename and save
+; handle_save_as: Prompt for filename and save (Ctrl+O)
+; ---------------------------------------------------------------------------
+handle_save_as:
+    ; Move to below text or bottom of screen
+    lda screen_rows
+    sec
+    sbc #1
+    jsr move_cursor_to_line_a
+    
+    lda #<ansi_clear_line
+    ldy #>ansi_clear_line
+    jsr print_str_ay
+    
+    lda #<filename_prompt
+    ldy #>filename_prompt
+    jsr print_str_ay
+    
+    ; Read filename
+    ldy #0
+@read_fname:
+    jsr CHRIN
+    cmp #$0D ; Enter
+    beq @fname_done
+    cmp #$1B ; ESC - Cancel
+    beq @cancel_save
+    cmp #$08 ; Backspace
+    beq @fname_bs
+    cmp #$7F ; Delete
+    beq @fname_bs
+    cmp #$20
+    bcc @read_fname
+    
+    sta filename_buf, y
+    jsr OUTCH
+    iny
+    cpy #126
+    bcc @read_fname
+    jmp @read_fname
+    
+@fname_bs:
+    cpy #0
+    beq @read_fname
+    dey
+    lda #$08
+    jsr OUTCH
+    lda #' '
+    jsr OUTCH
+    lda #$08
+    jsr OUTCH
+    jmp @read_fname
+
+@fname_done:
+    lda #0
+    sta filename_buf, y
+    jsr perform_save
+@cancel_save:
+    jsr redraw_screen
+    jmp loop_continue
 
 ; ---------------------------------------------------------------------------
 ; insert_and_redraw_char: Inserts char in A and redraws the current line
@@ -892,15 +1014,11 @@ redraw_line_from_cursor:
     rts
 
 exit_check:
-    ; Move to a safe line (23) at bottom of screen for prompt
-    lda #<ansi_line23
-    ldy #>ansi_line23
-    jsr print_str_ay
-
-    ; Clear the line to prevent artifacts
-    lda #<ansi_clear_line
-    ldy #>ansi_clear_line
-    jsr print_str_ay
+    ; Move to below text or bottom of screen
+    lda screen_rows
+    sec
+    sbc #1
+    jsr move_cursor_to_line_a
 
     lda #<save_prompt
     ldy #>save_prompt
@@ -974,6 +1092,21 @@ save_sequence:
     ; Fall through to exit_editor
     
 exit_editor:
+    ; Clear prompt and footer lines
+    lda screen_rows
+    jsr move_cursor_to_line_a
+    lda #<ansi_clear_line
+    ldy #>ansi_clear_line
+    jsr print_str_ay
+
+    lda screen_rows
+    sec
+    sbc #1
+    jsr move_cursor_to_line_a
+    lda #<ansi_clear_line
+    ldy #>ansi_clear_line
+    jsr print_str_ay
+
     pla          ; Get Y
     tay
     pla          ; Get X
@@ -1060,12 +1193,6 @@ init_ui:
     lda #<header_msg
     ldy #>header_msg
     jsr print_str_ay
-    
-    ; Print footer right after header
-    jsr CRLF
-    lda #<footer_msg
-    ldy #>footer_msg
-    jsr print_str_ay
     jsr CRLF
     
     lda filename_buf
@@ -1088,6 +1215,175 @@ init_ui:
     ldy #>separator_msg
     jsr print_str_ay
     jsr CRLF
+    rts
+
+; ---------------------------------------------------------------------------
+; Try to load file into buffer
+; ---------------------------------------------------------------------------
+try_load_file:
+    lda filename_buf
+    bne @has_name
+    rts
+@has_name:
+    ; Construct path
+    jsr construct_path_arg
+    
+    lda #<msg_loading
+    ldy #>msg_loading
+    jsr print_str_ay
+    jsr CRLF
+    
+    ; 1. Open File
+    lda #CMD_FS_OPEN
+    sta CMD_ID
+    ; ARG_BUFF already has path from construct_path_arg
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    beq @open_ok
+    
+    cmp #STATUS_NO_FILE
+    beq @new_file
+    
+    ; Error
+    lda #<msg_err
+    ldy #>msg_err
+    jsr print_str_ay
+    jsr CRLF
+    rts
+
+@new_file:
+    lda #<msg_new_file
+    ldy #>msg_new_file
+    jsr print_str_ay
+    jsr CRLF
+    rts
+
+@open_ok:
+    ; Get Handle and Size
+    lda RESP_BUFF
+    sta file_handle
+    
+    lda RESP_BUFF+1
+    sta file_length_lo
+    lda RESP_BUFF+2
+    sta file_length_hi
+    
+    ; Setup pointers
+    lda #<text_buffer_fixed
+    sta t_str_ptr2
+    lda #>text_buffer_fixed
+    sta t_str_ptr2+1
+    
+    ; Setup counters
+    lda file_length_lo
+    sta bytes_remaining_lo
+    lda file_length_hi
+    sta bytes_remaining_hi
+    
+    ; Limit to 4095
+    lda bytes_remaining_hi
+    cmp #>TEXT_BUFFER_SIZE
+    bcc @size_ok
+    lda #>(TEXT_BUFFER_SIZE-1)
+    sta bytes_remaining_hi
+    lda #<(TEXT_BUFFER_SIZE-1)
+    sta bytes_remaining_lo
+@size_ok:
+
+@read_loop:
+    lda bytes_remaining_lo
+    ora bytes_remaining_hi
+    beq @read_done
+    
+    ; Calculate chunk size (min(bytes_remaining, 250))
+    lda bytes_remaining_hi
+    bne @use_max_chunk
+    lda bytes_remaining_lo
+    cmp #250
+    bcs @use_max_chunk
+    sta chunk_size
+    jmp @do_read
+@use_max_chunk:
+    lda #250
+    sta chunk_size
+    
+@do_read:
+    ; Send READ command
+    lda #CMD_FS_READ
+    sta CMD_ID
+    
+    lda file_handle
+    sta ARG_BUFF
+    lda chunk_size
+    sta ARG_BUFF+1
+    lda #0
+    sta ARG_BUFF+2
+    
+    lda #3
+    sta ARG_LEN
+    
+    jsr pico_send_request
+    
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    bne @read_err
+    
+    ; Copy data from RESP_BUFF to text buffer
+    ldx #0
+@copy_loop:
+    cpx RESP_LEN
+    beq @copy_done
+    lda RESP_BUFF, x
+    ldy #0
+    sta (t_str_ptr2), y
+    
+    inc t_str_ptr2
+    bne @no_inc_ptr
+    inc t_str_ptr2+1
+@no_inc_ptr:
+    inx
+    jmp @copy_loop
+    
+@copy_done:
+    ; Decrement bytes remaining
+    sec
+    lda bytes_remaining_lo
+    sbc RESP_LEN
+    sta bytes_remaining_lo
+    lda bytes_remaining_hi
+    sbc #0
+    sta bytes_remaining_hi
+    
+    jmp @read_loop
+
+@read_err:
+    lda #<msg_err
+    ldy #>msg_err
+    jsr print_str_ay
+    jsr CRLF
+    jmp @close_file
+
+@read_done:
+    ; Ensure null termination
+    lda #0
+    ldy #0
+    sta (t_str_ptr2), y
+
+    lda #<msg_loaded
+    ldy #>msg_loaded
+    jsr print_str_ay
+    jsr CRLF
+
+@close_file:
+    lda #CMD_FS_CLOSE
+    sta CMD_ID
+    lda file_handle
+    sta ARG_BUFF
+    lda #1
+    sta ARG_LEN
+    jsr pico_send_request
     rts
 
 ; ---------------------------------------------------------------------------
@@ -1124,64 +1420,13 @@ perform_save:
     jmp @calc_len_loop
     
 @len_done:
-    ; 2. Construct Path in ARG_BUFF
-    lda filename_buf
-    cmp #'/'
-    beq @abs_path
+    ; 2. Construct Path
+    jsr construct_path_arg
     
-    ; Relative path
-    ldx #0
-    ldy #0
-    
-    lda cwd_ptr
-    sta t_str_ptr2
-    lda cwd_ptr+1
-    sta t_str_ptr2+1
-    
-@copy_cwd:
-    lda (t_str_ptr2), y
-    beq @cwd_done
-    sta ARG_BUFF, x
-    inx
-    iny
-    cpx #240
-    bcc @copy_cwd
-    
-@cwd_done:
-    cpx #0
-    beq @append_filename
-    lda #'/'
-    sta ARG_BUFF, x
-    inx
-    
-@append_filename:
-    ldy #0
-@copy_fname:
-    lda filename_buf, y
-    beq @path_done
-    sta ARG_BUFF, x
-    inx
-    iny
-    cpx #250
-    bcc @copy_fname
-    jmp @path_done
-    
-@abs_path:
-    ldx #0
-    ldy #0
-@copy_abs:
-    lda filename_buf, y
-    beq @path_done
-    sta ARG_BUFF, x
-    inx
-    iny
-    cpx #250
-    bcc @copy_abs
-
-@path_done:
-    lda #0
-    sta ARG_BUFF, x
-    inx
+    ; Append Length (ARG_LEN includes null term, overwrite it? No, append after)
+    ; construct_path_arg sets ARG_LEN to include the null terminator.
+    ; We want to append length bytes after the null.
+    ldx ARG_LEN
     
     ; Append Length
     lda file_length_lo
@@ -1311,6 +1556,72 @@ perform_save:
     rts
 
 ; ---------------------------------------------------------------------------
+; Construct Path Argument
+; Populates ARG_BUFF with full path. Sets ARG_LEN.
+; ---------------------------------------------------------------------------
+construct_path_arg:
+    lda filename_buf
+    cmp #'/'
+    beq @abs_path
+    
+    ; Relative path
+    ldx #0
+    ldy #0
+    
+    lda cwd_ptr
+    sta t_str_ptr2
+    lda cwd_ptr+1
+    sta t_str_ptr2+1
+    
+@copy_cwd:
+    lda (t_str_ptr2), y
+    beq @cwd_done
+    sta ARG_BUFF, x
+    inx
+    iny
+    cpx #240
+    bcc @copy_cwd
+    
+@cwd_done:
+    cpx #0
+    beq @append_filename
+    
+    ; Check if CWD already ends with /
+    dex
+    lda ARG_BUFF, x
+    inx
+    cmp #'/'
+    beq @append_filename
+    
+    lda #'/'
+    sta ARG_BUFF, x
+    inx
+    
+@append_filename:
+    ldy #0
+@copy_name_loop:
+    lda filename_buf, y
+    beq @path_done
+    sta ARG_BUFF, x
+    inx
+    iny
+    cpx #250
+    bcc @copy_name_loop
+    jmp @path_done
+    
+@abs_path:
+    ldx #0
+    ldy #0
+    jmp @copy_name_loop
+
+@path_done:
+    lda #0
+    sta ARG_BUFF, x
+    inx
+    stx ARG_LEN
+    rts
+
+; ---------------------------------------------------------------------------
 ; Redraw Screen - Clears and reprints the entire UI and text buffer
 ; ---------------------------------------------------------------------------
 redraw_screen:
@@ -1322,12 +1633,6 @@ redraw_screen:
     ; 2. Redraw UI header
     lda #<header_msg
     ldy #>header_msg
-    jsr print_str_ay
-    
-    ; Print footer right after header
-    jsr CRLF
-    lda #<footer_msg
-    ldy #>footer_msg
     jsr print_str_ay
     jsr CRLF
     
@@ -1346,13 +1651,20 @@ redraw_screen:
     lda #<separator_msg
     ldy #>separator_msg
     jsr print_str_ay
-    jsr CRLF
 
-    ; 3. Print the current text buffer content
-    lda #<text_buffer_fixed
-    sta t_ptr_temp
-    lda #>text_buffer_fixed
-    sta t_ptr_temp+1
+    ; 3. Print Text Viewport (Lines 4-22)
+    ; Find start of top_line_num
+    lda top_line_num
+    jsr get_ptr_at_line_a ; Returns ptr in t_ptr_temp
+    
+    ; Move to Line 4
+    lda #<ansi_line4
+    ldy #>ansi_line4
+    jsr print_str_ay
+    
+    lda #0
+    sta t_arg_ptr ; Line counter for viewport
+
 @print_loop:
     ; Check if we are at the cursor position
     lda t_ptr_temp
@@ -1371,11 +1683,28 @@ redraw_screen:
     ldy #0
     lda (t_ptr_temp), y
     beq @print_done
+    
+    cmp #$0A ; LF
+    bne @char_out
+    
+    ; Newline found
     jsr OUTCH
+    inc t_arg_ptr
+    lda t_arg_ptr
+    cmp viewport_height
+    bcs @viewport_full
+    jmp @next_char
+
+@char_out:
+    jsr OUTCH
+@next_char:
     inc t_ptr_temp
     bne @print_loop
     inc t_ptr_temp+1
     jmp @print_loop
+
+@viewport_full:
+    jmp @draw_footer
 
 @print_done:
     ; Check if cursor is at the very end (null terminator)
@@ -1396,7 +1725,8 @@ redraw_screen:
     lda #<ansi_restore
     ldy #>ansi_restore
     jsr print_str_ay
-    jsr update_status_bar
+    jsr draw_footer
+    jsr update_header_line_col
     rts
 ; ---------------------------------------------------------------------------
 ; Helper: Print String
@@ -1415,56 +1745,157 @@ print_str_ay:
     rts
 
 ; ---------------------------------------------------------------------------
+; Check Scroll: Updates top_line_num based on current_line
+; Returns Carry Set if redraw needed, Clear if not
+; ---------------------------------------------------------------------------
+check_scroll:
+    ; Check if above top
+    lda current_line
+    cmp top_line_num
+    bcc @scroll_up
+    
+    ; Check if below bottom (top + height - 1)
+    ; Limit check: top + 19
+    clc
+    lda top_line_num
+    adc viewport_height
+    cmp current_line
+    beq @scroll_down ; if top+19 == current, we are on 20th line (off screen)
+    bcc @scroll_down ; if top+19 < current
+    
+    clc ; No scroll needed
+    rts
+
+@scroll_up:
+    lda current_line
+    sta top_line_num
+    sec
+    rts
+
+@scroll_down:
+    sec
+    lda current_line
+    sbc viewport_height
+    adc #1 ; (sbc #19 becomes sbc #20, adc #1)
+    sta top_line_num
+    sec
+    rts
+
+; ---------------------------------------------------------------------------
+; Move cursor to appropriate line for prompts (Save/Exit)
+; Calculates end of text. If < 23, uses end+1. Else uses 24.
+; ---------------------------------------------------------------------------
+move_to_prompt_line:
+    ; Calculate where to put the prompt.
+    ; Ideal line is one after the text ends.
+    jsr get_text_end_screen_line ; Returns last line of text in A
+    clc
+    adc #1
+    sta t_ptr_temp ; t_ptr_temp = ideal_prompt_line
+
+    ; Max prompt line is one above the footer.
+    lda screen_rows
+    sec
+    sbc #1
+
+    ; Use the smaller of the two: min(ideal_prompt_line, max_prompt_line)
+    cmp t_ptr_temp      ; A = max_prompt_line, M = ideal_prompt_line
+    bcc @use_max_line   ; if max_prompt_line < ideal_prompt_line, use max_prompt_line
+    lda t_ptr_temp      ; else, ideal_prompt_line is smaller or equal, use it
+@use_max_line:
+    jmp move_cursor_to_line_a
+
+; ---------------------------------------------------------------------------
+; Calculate visual end line of text (1-based)
+; Returns A = Line number (starts at 5 due to header)
+; ---------------------------------------------------------------------------
+get_text_end_screen_line:
+    lda #4 ; Text starts on line 4
+    sta t_ptr_temp ; Use as line counter (low byte)
+    
+    lda #<text_buffer_fixed
+    sta t_str_ptr2
+    lda #>text_buffer_fixed
+    sta t_str_ptr2+1
+    
+@scan_loop:
+    ldy #0
+    lda (t_str_ptr2), y
+    beq @done
+    cmp #$0A ; LF
+    bne @next
+    inc t_ptr_temp
+@next:
+    inc t_str_ptr2
+    bne @scan_loop
+    inc t_str_ptr2+1
+    jmp @scan_loop
+@done:
+    lda t_ptr_temp
+    rts
+
+; ---------------------------------------------------------------------------
+; Move cursor to line A (1-based), Column 1
+; ---------------------------------------------------------------------------
+move_cursor_to_line_a:
+    pha
+    lda #<ansi_move_prefix
+    ldy #>ansi_move_prefix
+    jsr print_str_ay
+    pla
+    jsr print_dec_8
+    lda #<ansi_move_suffix
+    ldy #>ansi_move_suffix
+    jmp print_str_ay
+
+; ---------------------------------------------------------------------------
 ; Update Status Bar (Line 2) with Line/Col
 ; ---------------------------------------------------------------------------
-update_status_bar:
+draw_footer:
     ; Save cursor
     lda #<ansi_save
     ldy #>ansi_save
     jsr print_str_ay
     
-    ; Move to Line 2
-    lda #<ansi_line2
-    ldy #>ansi_line2
-    jsr print_str_ay
+    ; Move to Line 24 (Footer)
+    lda screen_rows
+    jsr move_cursor_to_line_a
     
     ; Print Footer Msg
     lda #<footer_msg
     ldy #>footer_msg
     jsr print_str_ay
     
-    ; Move to Col 50
-    lda #<ansi_col50
-    ldy #>ansi_col50
-    jsr print_str_ay
-    
-    ; Clear rest of line
-    lda #<ansi_clear_line
-    ldy #>ansi_clear_line
-    jsr print_str_ay
-    
-    ; Calc and Print Line/Col
-    jsr calc_line_col
-    
-    lda #<msg_line
-    ldy #>msg_line
-    jsr print_str_ay
-    
-    lda current_line
-    jsr print_dec_8
-    
-    lda #<msg_col
-    ldy #>msg_col
-    jsr print_str_ay
-    
-    lda current_col
-    jsr print_dec_8
-    
     ; Restore cursor
     lda #<ansi_restore
     ldy #>ansi_restore
     jsr print_str_ay
     rts
+
+update_header_line_col:
+    ; Save cursor
+    lda #<ansi_save
+    ldy #>ansi_save
+    jsr print_str_ay
+
+    ; Move to Line 1, Col 50
+    lda #<ansi_line1_col50
+    ldy #>ansi_line1_col50
+    jsr print_str_ay
+
+    ; Print Line/Col info
+    jsr print_line_col_info
+
+    ; Restore cursor
+    lda #<ansi_restore
+    ldy #>ansi_restore
+    jsr print_str_ay
+    rts
+
+update_status_bar:
+    jsr calc_line_col
+    jsr draw_footer
+    jmp update_header_line_col
 
 calc_line_col:
     lda #1
@@ -1502,6 +1933,149 @@ calc_line_col:
     inc t_ptr_temp+1
     jmp @scan_loop
 @done:
+    rts
+
+print_line_col_info:
+    ; Prints line/col info at current cursor position. Clears rest of line.
+    lda #<ansi_clear_line
+    ldy #>ansi_clear_line
+    jsr print_str_ay
+
+    lda #<msg_line
+    ldy #>msg_line
+    jsr print_str_ay
+
+    lda current_line
+    jsr print_dec_8
+
+    lda #<msg_col
+    ldy #>msg_col
+    jsr print_str_ay
+
+    lda current_col
+    jsr print_dec_8
+    rts
+
+; ---------------------------------------------------------------------------
+; detect_screen_size: Use ANSI DSR to get screen rows.
+; Output: Carry set on failure, clear on success. screen_rows updated.
+; ---------------------------------------------------------------------------
+detect_screen_size:
+    ; 1. Move cursor to bottom right
+    lda #<ansi_curs_far
+    ldy #>ansi_curs_far
+    jsr print_str_ay
+
+    ; 2. Ask for cursor position
+    lda #<ansi_ask_pos
+    ldy #>ansi_ask_pos
+    jsr print_str_ay
+
+    ; 3. Parse response: ESC [ <rows> ; <cols> R
+    ; Wait for ESC with timeout
+    jsr CHRIN_wait
+    bcs @fail
+    cmp #$1B ; ESC
+    bne @fail
+    jsr CHRIN_wait
+    bcs @fail
+    cmp #'['
+    bne @fail
+
+    ; Parse rows
+    jsr parse_decimal_from_input
+    bcc @got_rows
+    jmp @fail
+@got_rows:
+    sta screen_rows
+    
+    ; Check delimiter in X (should be ';')
+    cpx #';'
+    bne @fail
+
+    ; Parse cols (and discard)
+    jsr parse_decimal_from_input
+    bcc @got_cols
+    jmp @fail
+@got_cols:
+    ; Check delimiter in X (should be 'R')
+    cpx #'R'
+    bne @fail
+
+    clc ; Success
+    rts
+
+@fail:
+    sec ; Failure
+    rts
+
+; --- Helper: Wait for a character from ACIA ---
+CHRIN_wait:
+    ldy #0 ; Outer loop
+    ldx #0 ; Inner loop
+@loop:
+    jsr CHRIN
+    bcs @ok
+    dex
+    bne @loop
+    dey
+    bne @loop
+    sec ; Timeout, return carry set
+    rts
+@ok:
+    clc
+    rts
+
+; --- Helper: Parse a decimal number from CHRIN ---
+; Output: A = number, X = delimiter char, Carry set on error
+parse_decimal_from_input:
+    lda #0
+    sta t_ptr_temp    ; Accumulator for the number
+    sta t_ptr_temp+1
+
+@loop:
+    jsr CHRIN_wait
+    bcs @parse_err ; Timeout
+
+    cmp #'0'
+    bcc @done_delim ; Not a digit, assume we're done
+    cmp #'9'+1
+    bcs @done_delim
+
+    ; It's a digit.
+    sec
+    sbc #'0' ; Convert ASCII to binary
+    jsr add_digit_to_temp ; t_ptr_temp = t_ptr_temp*10 + A
+    jmp @loop
+
+@done_delim:
+    tax ; Save delimiter in X
+    lda t_ptr_temp
+    clc
+    rts
+@parse_err:
+    sec
+    rts
+
+; Helper: t_ptr_temp = t_ptr_temp*10 + A
+add_digit_to_temp:
+    pha ; Save new digit
+
+    ; Multiply t_ptr_temp by 10 (x*10 = x*8 + x*2)
+    lda t_ptr_temp
+    asl a
+    sta t_arg_ptr ; x*2
+    asl a
+    asl a
+    clc
+    adc t_arg_ptr ; x*8 + x*2
+    sta t_ptr_temp
+
+    ; Add new digit
+    pla
+    clc
+    adc t_ptr_temp
+    sta t_ptr_temp
     rts
 
 print_dec_8:
@@ -1556,6 +2130,38 @@ print_dec_8:
     rts
 
 ; ---------------------------------------------------------------------------
+; Get Pointer at Line A
+; Input: A = Line number (1-based)
+; Output: t_ptr_temp = Pointer to start of that line
+; ---------------------------------------------------------------------------
+get_ptr_at_line_a:
+    sta t_arg_ptr ; Target line
+    
+    lda #<text_buffer_fixed
+    sta t_ptr_temp
+    lda #>text_buffer_fixed
+    sta t_ptr_temp+1
+    
+    ldx #1 ; Current line counter
+@scan:
+    cpx t_arg_ptr
+    beq @found
+    
+    ldy #0
+    lda (t_ptr_temp), y
+    beq @found ; EOF reached
+    cmp #$0A ; LF
+    bne @next
+    inx
+@next:
+    inc t_ptr_temp
+    bne @scan
+    inc t_ptr_temp+1
+    jmp @scan
+@found:
+    rts
+
+; ---------------------------------------------------------------------------
 ; Local System Call Implementations
 ; ---------------------------------------------------------------------------
 CHRIN:
@@ -1579,20 +2185,23 @@ CRLF:
 .segment "RODATA"
 
 ansi_cls:        .byte $1B, "[2J", $1B, "[H", 0
-ansi_line23:     .byte $1B, "[23;1H", 0
-ansi_line2:      .byte $1B, "[2;1H", 0
-ansi_col50:      .byte $1B, "[50G", 0
+ansi_curs_far:   .byte $1B, "[999;999H", 0
+ansi_ask_pos:    .byte $1B, "[6n", 0
+ansi_line4:      .byte $1B, "[4;1H", 0
+ansi_line1_col50:.byte $1B, "[1;50H", 0
 ansi_clear_line: .byte $1B, "[K", 0
 ansi_left:       .byte $1B, "[D", 0
 ansi_right:      .byte $1B, "[C", 0
 ansi_up:         .byte $1B, "[A", 0
 ansi_down:       .byte $1B, "[B", 0
-ansi_save:       .byte $1B, "[s", 0
-ansi_restore:    .byte $1B, "[u", 0
+ansi_save:       .byte $1B, "7", 0
+ansi_restore:    .byte $1B, "8", 0
+ansi_move_prefix:.byte $1B, "[", 0
+ansi_move_suffix:.byte ";1H", 0
 header_msg:      .asciiz "WRITE - Nano-like Editor "
 no_file_msg:     .asciiz "[No File]"
 separator_msg:   .asciiz "--------------------------------------------------------------------------------"
-footer_msg:      .asciiz "^X Exit | ^F Search | Arrow Keys | BS DEL |"
+footer_msg:      .asciiz "^X Exit | ^O Save | ^F Search | Arrows | BS/Del |"
 msg_line:        .asciiz " Line: "
 msg_col:         .asciiz " Col: "
 save_prompt:     .asciiz "Save modified buffer? (Y/N) "
@@ -1603,6 +2212,9 @@ not_found_msg:   .asciiz "Not Found"
 msg_done:        .asciiz "Done"
 msg_err:         .asciiz "Error"
 stream_start_msg: .asciiz "Sending data: "
+msg_loading:     .asciiz "Loading..."
+msg_new_file:    .asciiz "New File"
+msg_loaded:      .asciiz "Loaded"
 
 ; ---------------------------------------------------------------------------
 ; BSS
@@ -1612,6 +2224,7 @@ stream_start_msg: .asciiz "Sending data: "
 ; Control variables
 current_line:      .res 1
 current_col:       .res 1
+top_line_num:      .res 1
 cwd_ptr:           .res 2
 file_length_lo:    .res 1
 file_length_hi:    .res 1
@@ -1620,6 +2233,10 @@ bytes_remaining_hi:.res 1
 filename_buf:      .res 128
 search_buf:        .res 64
 search_len:        .res 1
+file_handle:       .res 1
+chunk_size:        .res 1
+screen_rows:       .res 1
+viewport_height:   .res 1
 
 ; FIXED SIZE TEXT BUFFER
 text_buffer_fixed: .res 4096  ; 4KB fixed buffer

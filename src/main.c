@@ -1538,6 +1538,18 @@ int main() {
 			    int filename_len = strlen(filename);
 			    uint16_t length = arg_buf[filename_len + 1] | (arg_buf[filename_len + 2] << 8);
 			    
+			    // --- NEW SAFETY CHECK ---
+			    struct lfs_info info;
+			    int stat_err = lfs_stat(&lfs, filename, &info);
+			    if (stat_err == 0 && info.type == LFS_TYPE_DIR) {
+			        // Path exists and is a directory, this is an error for SAVEMEM
+			        printf("SAVEMEM: Path is a directory.\n");
+			        resp_buf[0] = STATUS_ERR;
+			        payload_len = 0;
+			        break;
+			    }
+			    // --- END SAFETY CHECK ---
+
 			    // Validate
 			    if (!fs_mounted) {
 			        printf("SAVEMEM: FS not mounted\n");
@@ -1598,6 +1610,18 @@ int main() {
                 char *p = strchr(filename, ' ');
                 if (p) *p = 0;
                 
+                // --- NEW SAFETY CHECK ---
+                struct lfs_info info;
+                int stat_err = lfs_stat(&lfs, filename, &info);
+                if (stat_err == 0 && info.type == LFS_TYPE_DIR) {
+                    // Path exists and is a directory, this is an error for LOADMEM
+                    printf("LOADMEM: Path is a directory.\n");
+                    resp_buf[0] = STATUS_ERR;
+                    payload_len = 0;
+                    break;
+                }
+                // --- END SAFETY CHECK ---
+
                 if (!fs_mounted) {
                     printf("LOADMEM: FS not mounted\n");
                     resp_buf[0] = STATUS_ERR;

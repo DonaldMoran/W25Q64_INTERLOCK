@@ -6,6 +6,47 @@ This document outlines the architecture, communication protocol, error handling,
 
 ---
 
+## ⚖️ Legal & Political Context
+
+### A Note on Creativity and Regulation
+
+This project represents the kind of creative, experimental tinkering that happens when curious people are free to explore interesting technical problems without asking permission.
+
+**Don's DOS ("DDOS")** connects a 1970s 6502 processor to modern flash memory—exactly the sort of educational, non-commercial work that flourishes in an environment of creative freedom.
+
+### 🗽 Political Perspective
+
+The author believes that laws mandating specific technical implementations—including age verification APIs—represent an overreach when applied outside their intended context of large commercial platforms. Such regulations can:
+
+- Chill innovation and knowledge-sharing among hobbyists
+- Create uncertainty for non-commercial creators
+- Solve problems that don't exist in experimental, offline projects like this one
+
+This project exists as a small stand for the principle that technical creativity should not require government permission.
+
+### ✅ Compliance Context
+
+To be clear about this project's actual scope:
+
+| Factor | Reality |
+|--------|---------|
+| **Commercial intent** | None. This is a hobbyist/educational project. |
+| **Distribution** | Source code on GitHub, not commercial app stores. |
+| **Users** | Retrocomputing enthusiasts, developers, learners. |
+| **Data collection** | Zero. No analytics, no tracking, no user data. |
+| **API integration** | None. No calls to any external services. |
+| **Target audience** | People interested in 6502 assembly and embedded systems. |
+
+This software is provided "as-is" for educational purposes. It is not a "covered application" under any state's age verification laws, as those laws target commercial app stores and the apps distributed through them.
+
+### 📚 Historical Context
+
+The 6502 processor this software runs on was designed in an era before legislators mandated features in operating systems. The author suggests that the explosion of creativity from that era—the Apple II, Commodore 64, Atari, and countless experiments—might not have happened under today's regulatory climate.
+
+*This statement reflects the author's views and is provided for context, not as legal advice. Last updated: March 2026.*
+
+---
+
 ## 1. Overall Architecture
 
 The system comprises the following main components:
@@ -58,8 +99,8 @@ The 65C02 computer issues commands, which are transmitted through the 6522 VIA t
 | `HELP` | | List available commands |
 | `CONNECT [SSID] [PASSWORD]` | | Connect to Wi-Fi (stores credentials) |
 | `EXIT` | | Exit shell to WozMon |
-| `SAVEMEM [START] [END] [FILE]` | | Save 6502 memory region to flash |
-| `LOADMEM [ADDR] [FILE]` | | Load file into 6502 memory |
+| `SAVEMEM [START] [END] [FILE]` | | Save 6502 memory region to flash. Fails if `[FILE]` is a directory. |
+| `LOADMEM [ADDR] [FILE]` | | Load file into 6502 memory. Fails if `[FILE]` is a directory. |
 | `RUN [FILE]` | | Load and execute binary (requires 2-byte header) |
 | `COPY [SRC] [DST]` | `CP` | Copy file |
 | `TOUCH [FILE]` | | Create empty file |
@@ -79,7 +120,7 @@ The 65C02 computer issues commands, which are transmitted through the 6522 VIA t
 | `TREE [PATH]` | | Visualize directory structure (External) |
 | `PICORBT` | | Reboot Bridge Pico (External) |
 | `CATALOG [PATH]` | | Streaming directory list for any size (External) |
-| `BASIC` | | Start MSBASIC (External) |
+| `BASIC` | | Start MSBASIC (External). Displays a "Don's DOS BASIC" splash screen. |
 | `KRUSADER` | | Start Krusader Assembler (External) |
 | `WOZMON` | | Start WozMon Monitor (External) |
 | `HEAD [FILE]` | | Print first 10 lines of file (External) |
@@ -259,7 +300,7 @@ Output: `ABCDEFGHIJKLMNOPQRSTUVWXYZ`
 
 The Krusader assembler has been patched with new file I/O commands:
 
-- **`S <filename>`**: Save Source. Saves the current source code buffer to a file.
+- **`S <filename>`**: Save Source. Saves the current source code buffer to a file (including the null terminator).
 - **`F <filename>`**: Fetch Source. Loads a source file into the buffer and re-indexes it.
 - **`O <filename>`**: Save Object. Saves the assembled binary (from `$0300` or defined origin) to a file.
 
@@ -659,7 +700,7 @@ Builds:
 ip\0port\0local\0remote
 Sends CMD_NET_HTTP_POST
 
-> **Note:** Currently, transient commands (`GET`, `PUT`) require **full absolute paths** for local files (e.g., `/DOCS/FILE.TXT`) as they do not yet share the shell's Current Working Directory (CWD).
+> **Note:** Transient commands (`GET`, `PUT`) now fully support **relative paths** and respect the shell's Current Working Directory (CWD).
 
 ## 13. File Server (tools/file_server.py)
 
@@ -771,17 +812,20 @@ Maintains the future ideas section
   - **Key Features:**
 
     - **User Interface:** Full-screen editor with a header displaying the filename and a footer showing command shortcuts.
+      - **Scrolling Viewport:** The editor displays large files within a scrolling viewport (Lines 4-22), allowing for smooth navigation through documents larger than the screen.
       - **Input Handling:**
         - Supports standard alphanumeric input.
         - Handles `Enter` for newlines and `Tab` for spacing.
         - **Backspace:** Implemented visual and buffer-level character deletion.
-      - **Arrow Keys:** Escape sequence detection is in place to gracefully handle cursor keys.
-        - **Search:** `Ctrl+F` triggers a text search from the current cursor position, wrapping to the start if needed.
+      - **Navigation:**
+        - Full support for **Arrow Keys**, **Home**, **End**, **Page Up**, and **Page Down**.
+        - Navigation logic is optimized for handling the last line and page boundaries correctly.
+      - **Search:** `Ctrl+F` triggers a text search from the current cursor position, wrapping to the start if needed.
       - **File Management:**
-      - **Launch with Filename:** `WRITE <filename>` opens the editor with the target file pre-set.
-      - **Launch Empty:** `WRITE` opens a blank buffer.
-      - **Save & Exit:** Triggered via `Ctrl+X`.
-      - **Smart Prompting:** If a filename was not provided at launch, the editor prompts the user to enter one upon saving.
+        - **Launch with Filename:** `WRITE <filename>` opens an existing file or creates a new one. File loading is robust, using standard file I/O to prevent buffer corruption.
+        - **Save & Exit:** `Ctrl+X` prompts to save changes before exiting.
+        - **Save As:** `Ctrl+O` allows saving the current buffer to a new filename.
+        - **Smart Prompting:** If a filename was not provided at launch, the editor prompts the user to enter one upon saving.
   - **Architecture:**
     - Operates as a transient command loaded at `$0800`.
     - Utilizes a 4KB fixed memory buffer for text storage.
@@ -1000,15 +1044,65 @@ Before building, open `src/main.c` and configure your network settings:
 
 5. **Flash:** Hold the BOOTSEL button on your standard Pico, connect it to USB, and copy the generated `.uf2` file to the `RPI-RP2` drive.
 
-## 21. Last commit branch feature/transient-8
+## 21. Last commit branch feature/transient-9
 
 **Accomplishments:**
 
-1. **System Stability & Synchronization:**
-    - Corrected issue with Pico bridge in main.c such that a save or load to a non-existing directory is handled gracefully.
+1. **System Stability:**
+    - Added safety checks to `SAVEMEM` and `LOADMEM` commands in the Pico firmware to prevent system instability when attempting to save or load to a path that is an existing directory.
 
-2. **New Transient Commands:**
-    - **`CLS`**: Clear the screen and return home (ANSI).
+2. **Text Editor (`WRITE`) Improvements:**
+    - **File Loading:** Editor now correctly loads existing files specified at startup.
+    - **Save As:** Added `Ctrl+O` to save the buffer with a new filename.
+    - **Stability:** Switched file loading from streaming `LOADMEM` to standard `OPEN`/`READ` operations to eliminate buffer corruption (garbage characters).
+    - **Navigation:** Fixed Down Arrow behavior on the last line and improved Page Down logic.
+    - **UI Polish:** Dynamic positioning of the save prompt. Implemented scrolling viewport (Lines 4-22) for large files. Fixed footer positioning and ensured clean screen restoration upon exit.
 
-3. **Calculator (`CALC`):**
-    - All basic arithmetic operations for unsigned 16-bit integers (0-65535), with comprehensive input validation corrected.
+3. **Network Command Enhancements:**
+    - **`GET`**: Added support for relative local paths (CWD awareness). If local filename is omitted, it now saves to CWD using the remote basename instead of appending the full path.
+    - **`PUT`**: Added support for uploading to remote directories (trailing slash) by automatically appending the local filename.
+
+4. **Transient Command Polish:**
+    - **`BASIC` & `KRUSADER`**: Added automatic screen clear and cursor home before launching to ensure a clean environment.
+    - **`BASIC`**: Added a splash screen message on startup.
+
+5. **Shell Enhancements:**
+    - **Startup:** Added automatic screen clear and cursor home when the shell starts.
+    - **Optimization:** Deduplicated error messages in `cmd_shell.s` to recover ROM space, ensuring the new features fit within the 4KB limit.
+
+6. **Editor Overhaul (`WRITE`): Performance, UI, and Compatibility**
+    - **Dynamic Screen Sizing:** The editor now automatically detects the terminal's screen size using ANSI escape codes at startup. It dynamically adjusts the footer position and viewport height, with a safe fallback to a 24-line default for terminals that don't support size detection.
+    - **Performance Optimization:**
+        - **Flicker-Free Backspace:** Deleting characters no longer redraws the entire screen, eliminating distracting flickering.
+        - **Instant Typing:** Keystroke latency has been removed by optimizing the line/column calculation, resulting in a much more responsive and pleasant typing experience.
+    - **UI Enhancements:**
+        - The line and column counter has been moved from the footer to the top-right of the header for better visibility.
+        - The footer has been updated to correctly note the `BS/Del` key functions.
+    - **VT100 Compatibility:** Switched to universal `ESC 7`/`ESC 8` cursor save/restore codes, ensuring full compatibility with strict VT100 terminals and modern emulators.
+    - **Bug Fixes:** Corrected several bugs related to ANSI response parsing, compilation scope, and the initialization of on-screen counters to ensure stability and a clean startup.
+
+7. **Release Packaging Tool (`tools/pkg_builder.py`)**
+    - A new Python 3 tool has been created to automate the process of creating release packages. This script (`tools/pkg_builder.py`) performs the following actions:
+        - Prompts the user for a version number.
+        - Cleans up old release builds.
+        - Collects the necessary `.uf2` firmware files for both the Bridge and Host Picos from their respective build directories.
+        - Collects all transient command `.bin` files.
+        - Renames the `.bin` files to uppercase (e.g., `ping.bin` becomes `PING.BIN`).
+        - Creates a `transient_cmds.zip` archive containing all the uppercase `.bin` files.
+        - Organizes the `.uf2` files and the `transient_cmds.zip` into a versioned directory (e.g., `tools/pkg_build/version_1.0/`).
+
+8. **Krusader File I/O Robustness**
+    - **Save Source (`S`):** Now includes the null terminator (End of Program marker) in the saved file. This ensures the file is a complete, valid image of the source code.
+    - **Fetch Source (`F`):** Updated to rely on the file's terminator instead of manually patching memory. This fixes potential lockups when loading into dirty memory.
+    - **Compatibility Note:** Source files saved with previous versions of the firmware may lack the terminator and could cause issues. Re-saving them with the new version fixes this.
+
+9. **RLIST Command Stability Fix**
+    - **Issue:** `RLIST` would print garbage continuously if run after exiting `BASIC`.
+    - **Root Cause:** Microsoft BASIC leaves the 6502 CPU in Decimal Mode (`D=1`) and interrupts enabled upon exit. This corrupted binary arithmetic in the `pico_lib` low-level driver used by `RLIST`'s streaming protocol.
+    - **Fix:** Added `CLD` (Clear Decimal) and `SEI` (Disable Interrupts) to the startup sequence of `RLIST` to sanitize the CPU state. This ensures robust operation regardless of the previous program's state.
+
+    - **Broader Fix:** The `cmd_shell.s` now also sanitizes CPU state by calling `CLD` and `SEI` instructions, meaning all commands are safe and protected from state after BASIC command completes execution.
+
+10. **TREE Command Enhancements**
+    - **Pagination:** Implemented pagination for the `tree` command. It now pauses after every 22 lines and displays `--More--`, waiting for a keypress. This prevents large directory structures from scrolling off the screen.
+    - **Cleanup:** Added automatic deletion of the temporary file `/tree.tmp` upon completion of the command, ensuring the filesystem remains clean.

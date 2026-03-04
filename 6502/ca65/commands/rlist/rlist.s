@@ -45,6 +45,13 @@ start:
     tya
     pha
 
+    ; --- CRITICAL CPU STATE SANITIZATION ---
+    ; BASIC is known to exit without cleaning up CPU flags.
+    ; 1. Decimal Mode (D=1) breaks binary arithmetic in library calls.
+    ; 2. Interrupts (I=0) can cause race conditions with slow I/O.
+    cld                 ; Force Binary Mode for correct math.
+    sei                 ; Disable interrupts.
+
     ; Initialize paging counter
     lda #0
     sta t_line_cnt
@@ -79,7 +86,10 @@ start:
     
     ; Error: server.cfg not found
     lda #<msg_no_server
-    jsr print_error_and_exit
+    sta t_ptr_temp
+    lda #>msg_no_server
+    sta t_ptr_temp+1
+    jsr print_string_crlf
     jmp done
 
 @read_cfg:
@@ -105,7 +115,7 @@ start:
 @find_colon:
     lda cfg_buffer, x
     bne @check_colon
-    jmp bad_cfg         ; End of string before colon
+    jmp bad_cfg_format         ; End of string before colon
 @check_colon:
     cmp #':'
     beq @found_colon
@@ -206,7 +216,10 @@ start:
     ; 4. Execute Download
     ; -----------------------------------------------------------------------
     lda #<msg_downloading
-    jsr print_msg
+    sta t_ptr_temp
+    lda #>msg_downloading
+    sta t_ptr_temp+1
+    jsr print_string
 
     lda #CMD_NET_HTTP_GET
     sta CMD_ID
@@ -217,7 +230,10 @@ start:
     beq @download_ok
     
     lda #<msg_fail
-    jsr print_error_and_exit
+    sta t_ptr_temp
+    lda #>msg_fail
+    sta t_ptr_temp+1
+    jsr print_string_crlf
     jmp done
 
 @download_ok:
@@ -312,9 +328,12 @@ done:
     clc
     rts
 
-bad_cfg:
+bad_cfg_format:
     lda #<msg_bad_cfg
-    jsr print_error_and_exit
+    sta t_ptr_temp
+    lda #>msg_bad_cfg
+    sta t_ptr_temp+1
+    jsr print_string_crlf
     jmp done
 
 ; ---------------------------------------------------------------------------
@@ -344,12 +363,7 @@ skip_word:
 @done:
     rts
 
-print_msg:
-    sta t_ptr_temp
-    stx t_ptr_temp+1 ; Assumes high byte passed in X or set before
-    ; Fallthrough to print_string_zp
-
-print_string_zp:
+print_string:
     ldy #0
 @loop:
     lda (t_ptr_temp), y
@@ -360,11 +374,8 @@ print_string_zp:
 @done:
     rts
 
-print_error_and_exit:
-    sta t_ptr_temp
-    lda #>msg_fail ; Just use high byte of any string in RODATA
-    sta t_ptr_temp+1
-    jsr print_string_zp
+print_string_crlf:
+    jsr print_string
     jsr CRLF
     rts
 
@@ -388,7 +399,7 @@ check_paging:
     sta t_ptr_temp
     lda #>msg_more
     sta t_ptr_temp+1
-    jsr print_string_zp
+    jsr print_string
     
 @wait_key:
     lda ACIA_DATA

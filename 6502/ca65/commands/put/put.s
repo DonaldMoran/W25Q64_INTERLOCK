@@ -360,6 +360,12 @@ close_file:
     iny
     jmp @copy_remote
 @remote_done:
+    ; Check if remote path ends in '/'
+    dex
+    lda ARG_BUFF, x
+    inx
+    cmp #'/'
+    beq @append_basename_only
     lda #0
     sta ARG_BUFF, x
     inx
@@ -370,6 +376,7 @@ close_file:
     lda #'/'
     sta ARG_BUFF, x
     inx
+@append_basename_only:
 
     ; Find start of basename in INPUT_BUFFER
     ldy local_start

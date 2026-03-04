@@ -81,8 +81,9 @@
 .ifdef EATER
 		keyword_rts "LCDCMD", LCDCMD
 		keyword_rts "LCDPRINT", LCDPRINT
-                keyword_rts "BEEP", BEEP
-                keyword_rts "MON", MON
+        keyword_rts "BEEP", BEEP
+        keyword_rts "MON", MON
+        keyword_rts "DOS", DOS
 .endif
 
 
@@ -161,6 +162,7 @@ UNFNC_ATN:
 .ifdef CONFIG_2
 		keyword	"GO", TOKEN_GO
 .endif
+
         .segment "KEYWORDS"
 		.byte   0
 
