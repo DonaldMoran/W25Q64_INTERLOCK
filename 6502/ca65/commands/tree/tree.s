@@ -7,15 +7,17 @@
 ; ---------------------------------------------------------------------------
 ; Constants
 ; ---------------------------------------------------------------------------
+CMD_FS_REMOVE = $16
 CMD_FS_TREE = $27
 INPUT_BUFFER = $0300
+ACIA_DATA    = $5000
 VIA_DDRA     = $6003
 
 ; ---------------------------------------------------------------------------
 ; Zero Page
 ; ---------------------------------------------------------------------------
 t_str_ptr1   = $5A
-t_str_ptr2   = $5C
+t_line_cnt  = $5C ; Replaces unused t_str_ptr2
 t_ptr_temp   = $5E
 t_count      = $58 ; 2 bytes for length
 
@@ -37,6 +39,10 @@ start:
     pha
     tya
     pha
+
+    ; Initialize paging counter
+    lda #0
+    sta t_line_cnt
 
     ; -----------------------------------------------------------------------
     ; Parse Arguments (Optional Path)
@@ -105,7 +111,7 @@ start:
     beq @done
 
     jsr read_byte
-    jsr OUTCH       ; Print char
+    jsr paging_outch ; Print char with pagination
 
     ; Decrement counter
     lda t_count
@@ -130,6 +136,23 @@ start:
 @done:
     lda #$FF
     sta VIA_DDRA    ; Restore Port A to Output
+
+    ; -----------------------------------------------------------------------
+    ; Cleanup: Delete the temporary file
+    ; -----------------------------------------------------------------------
+    ldx #0
+@copy_tmp_name:
+    lda str_tmp_file, x
+    sta ARG_BUFF, x
+    beq @tmp_name_done
+    inx
+    jmp @copy_tmp_name
+@tmp_name_done:
+    stx ARG_LEN
+
+    lda #CMD_FS_REMOVE
+    sta CMD_ID
+    jsr pico_send_request
 
     pla
     tay
@@ -189,3 +212,41 @@ print_string:
 
 .segment "RODATA"
 msg_fail:  .asciiz "Error: Failed to list tree"
+str_tmp_file: .asciiz "/tree.tmp"
+msg_more:  .asciiz "--More--"
+
+; ---------------------------------------------------------------------------
+; Helper: Paging output routines (adapted from rlist)
+; ---------------------------------------------------------------------------
+paging_outch:
+    pha
+    jsr OUTCH
+    pla
+    cmp #$0A        ; is it a newline?
+    bne @done
+    jsr check_paging
+@done:
+    rts
+
+check_paging:
+    inc t_line_cnt
+    lda t_line_cnt
+    cmp #22         ; 22 lines per page
+    bcc @done
+
+    ; Print --More-- and wait for key
+    lda #<msg_more
+    sta t_str_ptr1
+    lda #>msg_more
+    sta t_str_ptr1+1
+    jsr print_string
+
+@wait_key:
+    lda ACIA_DATA
+    beq @wait_key
+    jsr CRLF
+    lda #0
+    sta t_line_cnt
+.segment "RODATA"
+@done:
+    rts

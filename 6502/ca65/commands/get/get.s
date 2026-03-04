@@ -328,9 +328,43 @@ close_file:
     lda local_len
     beq @use_remote_name
     
-    ; Use provided local path
+    ; Check if provided local path is absolute
     ldy local_start
-@copy_local:
+    lda INPUT_BUFFER, y
+    cmp #'/'
+    beq @copy_local_abs
+
+    ; Relative path - prepend CWD
+    lda cwd_ptr
+    sta ptr_temp
+    lda cwd_ptr+1
+    sta ptr_temp+1
+    
+    phy ; Save Y (local_start)
+    ldy #0
+@copy_cwd_explicit:
+    lda (ptr_temp), y
+    beq @cwd_done_explicit
+    sta ARG_BUFF, x
+    inx
+    iny
+    jmp @copy_cwd_explicit
+@cwd_done_explicit:
+    ; Add slash if needed
+    lda (ptr_temp)
+    cmp #'/'
+    bne @add_slash_explicit
+    ldy #1
+    lda (ptr_temp), y
+    beq @no_slash_explicit
+@add_slash_explicit:
+    lda #'/'
+    sta ARG_BUFF, x
+    inx
+@no_slash_explicit:
+    ply ; Restore Y (local_start)
+
+@copy_local_abs:
     lda INPUT_BUFFER, y
     beq @local_done
     cmp #' '
@@ -338,7 +372,7 @@ close_file:
     sta ARG_BUFF, x
     inx
     iny
-    jmp @copy_local
+    jmp @copy_local_abs
 @local_done:
     lda #0
     sta ARG_BUFF, x
@@ -374,8 +408,26 @@ close_file:
     inx
 @no_slash_needed:
     
-    ; Copy remote filename as local filename
+    ; Find basename of remote path
     ldy remote_start
+    sty ptr_temp      ; Store start index
+    
+@scan_slash:
+    lda INPUT_BUFFER, y
+    beq @scan_done
+    cmp #' '
+    beq @scan_done
+    cmp #'/'
+    bne @next_char
+    sty ptr_temp      ; Found slash, update start index
+    inc ptr_temp      ; Point to char after slash
+@next_char:
+    iny
+    jmp @scan_slash
+@scan_done:
+
+    ; Copy remote filename (basename) as local filename
+    ldy ptr_temp
 @copy_remote_name:
     lda INPUT_BUFFER, y
     beq @remote_name_done

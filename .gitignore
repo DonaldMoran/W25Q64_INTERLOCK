@@ -25,6 +25,7 @@ obj/
 *.elf
 *.map
 *.lst
+*.zip
 
 # ============================
 # Pico SDK / CMake generated

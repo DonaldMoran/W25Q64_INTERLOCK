@@ -361,6 +361,12 @@ EXT_SAVE_SRC:
     sbc z:SRCSTH
     sta savemem_len+1
     
+    ; Add 1 to include the null terminator
+    inc savemem_len
+    bne @len_ok
+    inc savemem_len+1
+@len_ok:
+    
     ; Prepare Command
     lda #CMD_FS_SAVEMEM
     sta CMD_ID
@@ -490,6 +496,9 @@ MON:
             LDA #$0A
             JSR MONCOUT 
             JMP $FF00
+
+DOS:
+            JMP DDOS_START
             
 ;ISCNTC:
 ;           rts
