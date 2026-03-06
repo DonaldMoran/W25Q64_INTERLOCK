@@ -1,13 +1,13 @@
 ; rm-fr.s - Recursive Remove Command
 ; Usage: rm-fr <path>
 
+.include "pico_def.inc"
 .import pico_send_request
 .import CMD_ID, ARG_LEN, LAST_STATUS, ARG_BUFF
 
 ; ---------------------------------------------------------------------------
 ; Constants
 ; ---------------------------------------------------------------------------
-CMD_FS_REMOVE_RECURSIVE = $25
 INPUT_BUFFER = $0300
 
 ; ---------------------------------------------------------------------------

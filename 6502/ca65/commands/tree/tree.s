@@ -1,17 +1,12 @@
 ; tree.s - Display directory tree
 ; Usage: tree [path]
 
+.include "pico_def.inc"
 .import pico_send_request, read_byte, send_byte
 .import CMD_ID, ARG_LEN, LAST_STATUS, ARG_BUFF
 
-; ---------------------------------------------------------------------------
-; Constants
-; ---------------------------------------------------------------------------
-CMD_FS_REMOVE = $16
-CMD_FS_TREE = $27
 INPUT_BUFFER = $0300
 ACIA_DATA    = $5000
-VIA_DDRA     = $6003
 
 ; ---------------------------------------------------------------------------
 ; Zero Page

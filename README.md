@@ -1106,3 +1106,39 @@ Before building, open `src/main.c` and configure your network settings:
 10. **TREE Command Enhancements**
     - **Pagination:** Implemented pagination for the `tree` command. It now pauses after every 22 lines and displays `--More--`, waiting for a keypress. This prevents large directory structures from scrolling off the screen.
     - **Cleanup:** Added automatic deletion of the temporary file `/tree.tmp` upon completion of the command, ensuring the filesystem remains clean.
+
+## 22. Current work branch feature/transient-10
+
+**Accomplishments:**
+
+1. **Protocol Synchronization:**
+    - Synchronized filesystem command definitions between `src/cmd_defs.h` (C) and `6502/ca65/common/pico_def.inc` (Assembly).
+    - Added missing opcodes: `CMD_FS_REMOVE_RECURSIVE` ($25), `CMD_FS_DELETE_CONTENTS` ($26), and `CMD_FS_TREE` ($27) to the assembly definitions.
+    - Refactored transient commands (`rm-fR`, `rmstar`, `tree`) to use the central `pico_def.inc` instead of hardcoded local constants, ensuring protocol consistency.
+
+2. **Filesystem Safety Hardening:**
+    - **Mount State Enforcement:** Added rigorous `if (!fs_mounted)` checks to every filesystem command (OPEN, READ, WRITE, MKDIR, etc.) and network command (HTTP GET/POST) in the Pico firmware. This prevents undefined behavior or crashes if commands are issued when the filesystem is not mounted.
+    - **Unmount Cleanup:** Updated `CMD_FS_UNMOUNT` to automatically close all open file handles and terminate any active streaming operations before unmounting. This ensures the system returns to a clean state and prevents handle leaks or conflicts upon re-mounting.
+
+3. **CMD_FS_COPY Safety Fix:**
+    - **Self-Copy Protection:** Fixed a critical bug where copying a file onto itself (e.g., `COPY FILE.TXT FILE.TXT`) would truncate the source file before reading it, resulting in data loss.
+    - **Robust Logic:** The command now opens the destination without truncation first, verifies that the source and destination file IDs are different, and only then proceeds with the copy operation.
+
+4. **CMD_FS_FORMAT Safety Hardening:**
+    - **Pre-Format Cleanup:** Updated `CMD_FS_FORMAT` to automatically close all open file handles, abort active streams, and unmount the filesystem before formatting.
+    - **State Consistency:** Ensures the system is in a clean, known state before the destructive format operation, preventing stale handles or undefined behavior.
+    - **Auto-Remount:** Automatically remounts the filesystem after a successful format, restoring operational readiness immediately.
+
+5. **Asynchronous DNS Refactor:**
+    - **Non-Blocking Resolution:** Refactored `CMD_NET_TIME`, `CMD_NET_HTTP_GET`, and `CMD_NET_HTTP_POST` to perform DNS lookups asynchronously using callbacks. This prevents the system from hanging while waiting for DNS responses.
+    - **Hostname Support:** The HTTP commands now intelligently attempt to parse the server address as an IP first, and fall back to a DNS lookup if parsing fails, allowing the use of hostnames (e.g., `files.myserver.com`) in addition to IP addresses.
+    - **Robust Polling:** Implemented proper polling of the network stack (`cyw43_arch_poll`) during wait loops to ensure background network tasks continue to run, preventing timeouts and improving stability.
+
+6. **New Transient Commands: Warm Start Utilities**
+    - **`BASICW`**: Implemented a warm-start utility for Microsoft BASIC. It attempts to jump to the BASIC warm-start vector (preserving the program in memory) if valid, otherwise falls back to cold start.
+    - **`KRUSADERW`**: Implemented a warm-start utility for the Krusader Assembler, allowing users to re-enter the assembler without losing their source code buffer.
+
+7. **New Transient Command: DF (Disk Free)**
+    - **Firmware Support:** Added `CMD_FS_SPACE` to the Pico firmware, which uses `lfs_fs_size()` to return total blocks, used blocks, and block size.
+    - **6502 Client:** Created the `DF` transient command to provide a human-readable disk usage report.
+    - **Safe Arithmetic:** The `DF` command performs 32-bit calculations on the 6502 to display usage in Blocks, KB, and MB, with robust logic to prevent overflow.

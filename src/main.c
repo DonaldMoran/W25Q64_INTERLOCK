@@ -73,6 +73,9 @@ typedef struct {
     bool connected;
     bool error;
     size_t received;
+    // DNS fields
+    bool dns_done;
+    ip_addr_t ip;
 } http_req_t;
 
 static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
@@ -114,6 +117,17 @@ static void http_err_cb(void *arg, err_t err) {
     req->complete = true;
 }
 
+static void http_dns_found_cb(const char *name, const ip_addr_t *ipaddr, void *callback_arg) {
+    http_req_t *req = (http_req_t *)callback_arg;
+    if (ipaddr) {
+        req->ip = *ipaddr;
+        req->dns_done = true;
+    } else {
+        req->error = true; // DNS failed
+        req->dns_done = true;
+    }
+}
+
 // --- NTP HELPERS ---
 #define NTP_SERVER "pool.ntp.org"
 #define NTP_PORT 123
@@ -124,6 +138,8 @@ typedef struct {
     bool complete;
     bool error;
     uint32_t timestamp;
+    bool dns_done;
+    ip_addr_t ip;
 } ntp_req_t;
 
 static void ntp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
@@ -137,6 +153,17 @@ static void ntp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip
         }
     }
     pbuf_free(p);
+}
+
+static void dns_found_cb(const char *name, const ip_addr_t *ipaddr, void *callback_arg) {
+    ntp_req_t *req = (ntp_req_t *)callback_arg;
+    if (ipaddr) {
+        req->ip = *ipaddr;
+        req->dns_done = true;
+    } else {
+        req->error = true; // DNS failed
+        req->dns_done = true;
+    }
 }
 
 // --- DATE/TIME HELPERS ---
@@ -224,8 +251,12 @@ int delete_directory_contents(lfs_t *lfs, const char *path) {
         }
         sprintf(subpath, "%s/%s", path, info.name);
 
-        // Reuse recursive_remove to delete the item (file or dir)
-        res = recursive_remove(lfs, subpath);
+        // Optimization: Call the correct remove function based on type
+        if (info.type == LFS_TYPE_DIR) {
+            res = recursive_remove(lfs, subpath);
+        } else {
+            res = lfs_remove(lfs, subpath);
+        }
         free(subpath);
         
         if (res < 0) {
@@ -270,7 +301,13 @@ int main() {
     stdio_init_all();
     sleep_ms(2000);
 
+    // --- CRITICAL FIX: Initialize Bus EARLY ---
+    // Initialize bus and reset handshake immediately so 6502 sees a valid state
+    // while we perform the slow WiFi and FS initialization.
     bus_init();
+    bus_reset_handshake();
+    // ------------------------------------------
+
     w25q_init_hardware();
     uint8_t jedec_id[3];
     w25q_read_jedec_id(jedec_id);
@@ -311,9 +348,6 @@ int main() {
             printf("LittleFS: Auto-mount failed (%d)\n", boot_mount_err);
         }
     }
-
-    // Signal 6502 that we are ready (Release CA1 to High/Idle)
-    bus_reset_handshake();
 
     while (1) {
         cyw43_arch_poll(); // Essential for Wi-Fi background operations
@@ -590,10 +624,36 @@ int main() {
 
             case CMD_FS_FORMAT:
                 {
+                    // 1. Safety Cleanup: Close handles and unmount
+                    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+                        if (open_files[i].used) {
+                            if (fs_mounted) lfs_file_close(&lfs, &open_files[i].file);
+                            open_files[i].used = false;
+                        }
+                    }
+                    if (stream_file_is_open) {
+                        if (fs_mounted) lfs_file_close(&lfs, &stream_file);
+                        stream_file_is_open = false;
+                    }
+
+                    if (fs_mounted) {
+                        lfs_unmount(&lfs);
+                        fs_mounted = false;
+                    }
+
+                    // 2. Perform Format
                     int format_err = lfs_format(&lfs, &w25q_cfg);
                     if (format_err == 0) {
                         printf("LittleFS: Format successful.\n");
-                        resp_buf[0] = STATUS_OK;
+                        // 3. Auto-mount after format
+                        int mount_err = lfs_mount(&lfs, &w25q_cfg);
+                        if (mount_err == 0) {
+                            fs_mounted = true;
+                            resp_buf[0] = STATUS_OK;
+                        } else {
+                            printf("LittleFS: Remount failed (%d)\n", mount_err);
+                            resp_buf[0] = STATUS_ERR;
+                        }
                     } else {
                         printf("LittleFS: Format failed (%d), possible hardware issue.\n", format_err);
                         resp_buf[0] = STATUS_ERR;
@@ -669,6 +729,11 @@ int main() {
             case CMD_FS_REMOVE:
                 {
                     // Works for files and empty directories
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
                     const char *path = (const char *)arg_buf;
                     int err = lfs_remove(&lfs, path);
                     if (err == LFS_ERR_NOENT) {
@@ -682,6 +747,11 @@ int main() {
 
             case CMD_FS_REMOVE_RECURSIVE:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
                     const char *path = (const char *)arg_buf;
                     int err = recursive_remove(&lfs, path);
                     if (err == LFS_ERR_NOENT) {
@@ -695,6 +765,11 @@ int main() {
 
             case CMD_FS_DELETE_CONTENTS:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
                     const char *path = (const char *)arg_buf;
                     int err = delete_directory_contents(&lfs, path);
                     if (err == LFS_ERR_NOENT) {
@@ -708,6 +783,12 @@ int main() {
 
             case CMD_FS_TREE:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
                     const char *path = (arg_len == 0) ? "/" : (const char *)arg_buf;
 
                     if (stream_file_is_open) {
@@ -760,6 +841,11 @@ int main() {
 
             case CMD_FS_MKDIR:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
                     const char *path = (const char *)arg_buf;
                     int err = lfs_mkdir(&lfs, path);
                     if (err == LFS_ERR_EXIST) {
@@ -773,6 +859,11 @@ int main() {
 
             case CMD_FS_TOUCH:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
                     // Open with CREAT | RDWR ensures existence without truncating
                     lfs_file_t file;
                     const char *path = (const char *)arg_buf;
@@ -789,6 +880,11 @@ int main() {
 
             case CMD_FS_RENAME:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
                     // Expects: "oldname\0newname"
                     const char *old_path = (const char *)arg_buf;
                     const char *new_path = old_path + strlen(old_path) + 1;
@@ -812,6 +908,11 @@ int main() {
 
             case CMD_FS_APPEND:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
                     // Expects: "filename\0data..."
                     const char *path = (const char *)arg_buf;
                     const uint8_t *data = (const uint8_t *)(path + strlen(path) + 1);
@@ -836,35 +937,67 @@ int main() {
 
             case CMD_FS_COPY:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
                     // Expects: "src\0dst"
                     const char *src_path = (const char *)arg_buf;
                     const char *dst_path = src_path + strlen(src_path) + 1;
 
                     if ((uint8_t*)dst_path >= arg_buf + arg_len) {
                         resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
                     } else {
                         lfs_file_t f_src, f_dst;
-                        int err_src = lfs_file_open(&lfs, &f_src, src_path, LFS_O_RDONLY);
-                        int err_dst = lfs_file_open(&lfs, &f_dst, dst_path, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+                        int err_src = -1, err_dst = -1;
+                        bool self_copy = false;
 
-                        if (err_src == 0 && err_dst == 0) {
-                            // Use the response buffer as a scratchpad for copying
-                            // We can use the area after the header (3 bytes)
-                            uint8_t *copy_buf = &resp_buf[3]; 
-                            lfs_ssize_t read_len;
-                            while ((read_len = lfs_file_read(&lfs, &f_src, copy_buf, sizeof(resp_buf) - 3)) > 0) {
-                                lfs_file_write(&lfs, &f_dst, copy_buf, read_len);
-                            }
-                            resp_buf[0] = STATUS_OK;
+                        // 1. Open source file for reading.
+                        err_src = lfs_file_open(&lfs, &f_src, src_path, LFS_O_RDONLY);
+                        if (err_src != 0) {
+                            resp_buf[0] = (err_src == LFS_ERR_NOENT) ? STATUS_NO_FILE : STATUS_ERR;
                         } else {
-                            if (err_src == LFS_ERR_NOENT) {
-                                resp_buf[0] = STATUS_NO_FILE;
+                            // 2. Open destination without truncation to check for self-copy.
+                            err_dst = lfs_file_open(&lfs, &f_dst, dst_path, LFS_O_RDWR);
+                            if (err_dst == 0) { // Destination exists.
+                                // Compare file identifiers (metadata pair + file ID within the pair).
+                                if (f_src.m.pair[0] == f_dst.m.pair[0] && f_src.id == f_dst.id) {
+                                    self_copy = true;
+                                }
+                                lfs_file_close(&lfs, &f_dst); // Close the temporary handle.
+                            }
+
+                            if (self_copy) {
+                                printf("COPY: Self-copy detected, aborting.\n");
+                                resp_buf[0] = STATUS_ERR; // Abort to prevent data loss.
                             } else {
-                                resp_buf[0] = STATUS_ERR;
+                                // 3. It's safe to proceed. Open destination with truncation.
+                                err_dst = lfs_file_open(&lfs, &f_dst, dst_path, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+                                if (err_dst == 0) {
+                                    // 4. Perform the copy.
+                                    uint8_t *copy_buf = &resp_buf[3]; 
+                                    lfs_ssize_t read_len;
+                                    while ((read_len = lfs_file_read(&lfs, &f_src, copy_buf, sizeof(resp_buf) - 3)) > 0) {
+                                        if (lfs_file_write(&lfs, &f_dst, copy_buf, read_len) < read_len) {
+                                            resp_buf[0] = STATUS_ERR; // Write error
+                                            break;
+                                        }
+                                    }
+                                    if (resp_buf[0] == STATUS_OK) { // If no write error occurred
+                                        resp_buf[0] = (read_len < 0) ? STATUS_ERR : STATUS_OK;
+                                    }
+                                } else {
+                                    resp_buf[0] = STATUS_ERR; // Failed to open destination.
+                                }
                             }
                         }
+
+                        // 5. Clean up open handles.
                         if (err_src == 0) lfs_file_close(&lfs, &f_src);
-                        if (err_dst == 0) lfs_file_close(&lfs, &f_dst);
+                        if (err_dst == 0 && !self_copy) lfs_file_close(&lfs, &f_dst);
                     }
                     payload_len = 0;
                 }
@@ -872,6 +1005,12 @@ int main() {
 
             case CMD_FS_OPEN:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
                     // Args: [Filename] or [Filename]\0[Mode]
                     // Mode: 0=RW/Create (Default), 1=RO
                     // Returns: [HandleID] [SizeLO] [SizeHI] [Size3] [Size4]
@@ -919,6 +1058,12 @@ int main() {
 
             case CMD_FS_CLOSE:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
                     // Args: [Handle]
                     uint8_t h = arg_buf[0];
                     if (h < MAX_OPEN_FILES && open_files[h].used) {
@@ -934,6 +1079,12 @@ int main() {
 
             case CMD_FS_READ:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
                     // Args: [Handle] [LenLO] [LenHI]
                     uint8_t h = arg_buf[0];
                     uint16_t req_len = arg_buf[1] | (arg_buf[2] << 8);
@@ -957,6 +1108,12 @@ int main() {
 
             case CMD_FS_WRITE:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
                     // Args: [Handle] [Data...]
                     uint8_t h = arg_buf[0];
                     if (h < MAX_OPEN_FILES && open_files[h].used && arg_len > 0) {
@@ -972,6 +1129,12 @@ int main() {
 
             case CMD_FS_SEEK:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
                     // Args: [Handle] [Offset(4)] [Whence]
                     uint8_t h = arg_buf[0];
                     int32_t offset = arg_buf[1] | (arg_buf[2] << 8) | (arg_buf[3] << 16) | (arg_buf[4] << 24);
@@ -998,6 +1161,12 @@ int main() {
 
             case CMD_FS_TELL:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
                     // Args: [Handle]
                     uint8_t h = arg_buf[0];
                     if (h < MAX_OPEN_FILES && open_files[h].used) {
@@ -1020,6 +1189,12 @@ int main() {
 
             case CMD_FS_STAT:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
                     // Args: [Path]
                     // Returns: [Type(1)] [Size(4)]
                     // Type: 1=Reg, 2=Dir
@@ -1046,6 +1221,12 @@ int main() {
 
             case CMD_FS_SIZE:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
                     // Args: None
                     // Returns: [BlockSize(4)] [BlockCount(4)]
                     resp_buf[0] = STATUS_OK;
@@ -1067,6 +1248,12 @@ int main() {
 
             case CMD_FS_SYNC:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
                     uint8_t h = arg_buf[0];
                     if (h < MAX_OPEN_FILES && open_files[h].used) {
                         int err = lfs_file_sync(&lfs, &open_files[h].file);
@@ -1077,8 +1264,55 @@ int main() {
                 }
                 break;
 
+            case CMD_FS_SPACE:
+                {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
+                    lfs_ssize_t used_blocks = lfs_fs_size(&lfs);
+                    if (used_blocks < 0) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
+                    uint32_t total_blocks_val = w25q_cfg.block_count;
+                    uint32_t used_blocks_val = (uint32_t)used_blocks;
+                    uint32_t block_size_val = w25q_cfg.block_size;
+
+                    memcpy(payload_ptr + 0, &total_blocks_val, 4);
+                    memcpy(payload_ptr + 4, &used_blocks_val, 4);
+                    memcpy(payload_ptr + 8, &block_size_val, 4);
+                    payload_len = 12;
+                    resp_buf[0] = STATUS_OK;
+                }
+                break;
+
             case CMD_FS_UNMOUNT:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_OK;
+                        payload_len = 0;
+                        break;
+                    }
+
+                    // Close all open handles to prevent stale state
+                    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+                        if (open_files[i].used) {
+                            lfs_file_close(&lfs, &open_files[i].file);
+                            open_files[i].used = false;
+                        }
+                    }
+
+                    // Close stream file if open
+                    if (stream_file_is_open) {
+                        lfs_file_close(&lfs, &stream_file);
+                        stream_file_is_open = false;
+                    }
+
                     int u_err = lfs_unmount(&lfs);
                     if (u_err == 0) fs_mounted = false;
                     resp_buf[0] = (u_err == 0) ? STATUS_OK : STATUS_ERR;
@@ -1115,34 +1349,38 @@ int main() {
                             strncpy(pass, p, sizeof(pass)-1);
                             
                             // Save to file
-                            lfs_file_t file;
-                            if (lfs_file_open(&lfs, &file, "wifi.cfg", LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC) == 0) {
-                                char buf[128];
-                                int len = snprintf(buf, sizeof(buf), "%s\n%s", ssid, pass);
-                                lfs_file_write(&lfs, &file, buf, len);
-                                lfs_file_close(&lfs, &file);
+                            if (fs_mounted) {
+                                lfs_file_t file;
+                                if (lfs_file_open(&lfs, &file, "wifi.cfg", LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC) == 0) {
+                                    char buf[128];
+                                    int len = snprintf(buf, sizeof(buf), "%s\n%s", ssid, pass);
+                                    lfs_file_write(&lfs, &file, buf, len);
+                                    lfs_file_close(&lfs, &file);
+                                }
                             }
                             have_creds = true;
                         }
                     } else {
                         // No args: Load from file
-                        lfs_file_t file;
-                        if (lfs_file_open(&lfs, &file, "wifi.cfg", LFS_O_RDONLY) == 0) {
-                            char buf[128] = {0};
-                            lfs_ssize_t len = lfs_file_read(&lfs, &file, buf, sizeof(buf)-1);
-                            lfs_file_close(&lfs, &file);
-                            
-                            if (len > 0) {
-                                buf[len] = 0;
-                                char *nl = strchr(buf, '\n');
-                                if (nl) {
-                                    *nl = 0;
-                                    strncpy(ssid, buf, sizeof(ssid)-1);
-                                    strncpy(pass, nl+1, sizeof(pass)-1);
-                                    // Remove potential trailing CR/LF from pass
-                                    char *r = strpbrk(pass, "\r\n");
-                                    if (r) *r = 0;
-                                    have_creds = true;
+                        if (fs_mounted) {
+                            lfs_file_t file;
+                            if (lfs_file_open(&lfs, &file, "wifi.cfg", LFS_O_RDONLY) == 0) {
+                                char buf[128] = {0};
+                                lfs_ssize_t len = lfs_file_read(&lfs, &file, buf, sizeof(buf)-1);
+                                lfs_file_close(&lfs, &file);
+                                
+                                if (len > 0) {
+                                    buf[len] = 0;
+                                    char *nl = strchr(buf, '\n');
+                                    if (nl) {
+                                        *nl = 0;
+                                        strncpy(ssid, buf, sizeof(ssid)-1);
+                                        strncpy(pass, nl+1, sizeof(pass)-1);
+                                        // Remove potential trailing CR/LF from pass
+                                        char *r = strpbrk(pass, "\r\n");
+                                        if (r) *r = 0;
+                                        have_creds = true;
+                                    }
                                 }
                             }
                         }
@@ -1196,6 +1434,12 @@ int main() {
 
             case CMD_NET_HTTP_GET:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
                     // Args: [IP]\0[Port]\0[RemotePath]\0[LocalPath]
                     // Example: "192.168.1.5", "8000", "/game.bin", "game.bin"
                     
@@ -1204,25 +1448,49 @@ int main() {
                     const char *remote_path = port_str + strlen(port_str) + 1;
                     const char *local_path = remote_path + strlen(remote_path) + 1;
 
-                    ip_addr_t remote_ip;
-                    if (!ipaddr_aton(ip_str, &remote_ip)) {
-                        resp_buf[0] = STATUS_ERR;
-                        payload_len = 0;
-                        break;
-                    }
                     int port = atoi(port_str);
 
                     printf("HTTP GET %s:%d%s -> %s\n", ip_str, port, remote_path, local_path);
 
                     struct tcp_pcb *pcb = tcp_new();
                     http_req_t req = {0};
+
+                    // --- Resolve Hostname (New Logic) ---
+                    bool resolved = false;
+                    if (ipaddr_aton(ip_str, &req.ip)) {
+                        resolved = true;
+                    } else {
+                        // Not a valid IP, try DNS
+                        cyw43_arch_lwip_begin();
+                        int err = dns_gethostbyname(ip_str, &req.ip, http_dns_found_cb, &req);
+                        cyw43_arch_lwip_end();
+
+                        if (err == ERR_OK) {
+                            req.dns_done = true;
+                        } else if (err == ERR_INPROGRESS) {
+                            int timeout = 0;
+                            while (!req.dns_done && !req.error && timeout++ < 5000) {
+                                cyw43_arch_poll();
+                                sleep_ms(1);
+                            }
+                        } else {
+                            req.error = true;
+                        }
+                        if (req.dns_done && !req.error) resolved = true;
+                    }
+
+                    if (!resolved) {
+                        resp_buf[0] = STATUS_ERR;
+                        if (pcb) tcp_close(pcb);
+                        break;
+                    }
                     
                     tcp_arg(pcb, &req);
                     tcp_recv(pcb, http_recv_cb);
                     tcp_err(pcb, http_err_cb);
 
                     cyw43_arch_lwip_begin();
-                    tcp_connect(pcb, &remote_ip, port, http_connected_cb);
+                    tcp_connect(pcb, &req.ip, port, http_connected_cb);
                     cyw43_arch_lwip_end();
 
                     // Wait for connection
@@ -1280,25 +1548,55 @@ int main() {
 
             case CMD_NET_HTTP_POST:
                 {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
                     // Args: [IP]\0[Port]\0[LocalPath]\0[RemotePath]
                     const char *ip_str = (const char *)arg_buf;
                     const char *port_str = ip_str + strlen(ip_str) + 1;
                     const char *local_path = port_str + strlen(port_str) + 1;
                     const char *remote_path = local_path + strlen(local_path) + 1;
 
-                    ip_addr_t remote_ip;
-                    if (!ipaddr_aton(ip_str, &remote_ip)) {
-                        resp_buf[0] = STATUS_ERR;
-                        payload_len = 0;
-                        break;
-                    }
                     int port = atoi(port_str);
+                    http_req_t req = {0};
+
+                    // --- Resolve Hostname (New Logic) ---
+                    bool resolved = false;
+                    if (ipaddr_aton(ip_str, &req.ip)) {
+                        resolved = true;
+                    } else {
+                        // Not a valid IP, try DNS
+                        cyw43_arch_lwip_begin();
+                        int err = dns_gethostbyname(ip_str, &req.ip, http_dns_found_cb, &req);
+                        cyw43_arch_lwip_end();
+
+                        if (err == ERR_OK) {
+                            req.dns_done = true;
+                        } else if (err == ERR_INPROGRESS) {
+                            int timeout = 0;
+                            while (!req.dns_done && !req.error && timeout++ < 5000) {
+                                cyw43_arch_poll();
+                                sleep_ms(1);
+                            }
+                        } else {
+                            req.error = true;
+                        }
+                        if (req.dns_done && !req.error) resolved = true;
+                    }
 
                     // 1. Open Local File
                     lfs_file_t file;
                     if (lfs_file_open(&lfs, &file, local_path, LFS_O_RDONLY) != 0) {
-                        resp_buf[0] = STATUS_ERR; // File not found
+                        resp_buf[0] = STATUS_NO_FILE;
                         payload_len = 0;
+                        break;
+                    }
+                    if (!resolved) {
+                        resp_buf[0] = STATUS_ERR;
+                        lfs_file_close(&lfs, &file);
                         break;
                     }
                     lfs_soff_t file_size = lfs_file_size(&lfs, &file);
@@ -1307,13 +1605,12 @@ int main() {
 
                     // 2. Connect
                     struct tcp_pcb *pcb = tcp_new();
-                    http_req_t req = {0};
                     tcp_arg(pcb, &req);
                     tcp_recv(pcb, http_recv_cb); // We still need to read the "200 OK" response
                     tcp_err(pcb, http_err_cb);
 
                     cyw43_arch_lwip_begin();
-                    tcp_connect(pcb, &remote_ip, port, http_connected_cb);
+                    tcp_connect(pcb, &req.ip, port, http_connected_cb);
                     cyw43_arch_lwip_end();
 
                     int timeout = 0;
@@ -1398,23 +1695,41 @@ int main() {
                     
                     udp_recv(pcb, ntp_recv_cb, &req);
                     
-                    ip_addr_t ntp_ip;
-                    int err = dns_gethostbyname(NTP_SERVER, &ntp_ip, NULL, NULL);
+                    cyw43_arch_lwip_begin();
+                    int err = dns_gethostbyname(NTP_SERVER, &req.ip, dns_found_cb, &req);
+                    cyw43_arch_lwip_end();
                     
                     if (err == ERR_OK) {
+                        req.dns_done = true;
+                    } else if (err == ERR_INPROGRESS) {
+                        // Wait for DNS resolution
+                        int timeout = 0;
+                        while (!req.dns_done && timeout++ < 5000) {
+                            cyw43_arch_poll();
+                            sleep_ms(1);
+                        }
+                        if (!req.dns_done) req.error = true;
+                    } else {
+                        req.error = true;
+                    }
+
+                    if (!req.error) {
                         struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, NTP_MSG_LEN, PBUF_RAM);
                         uint8_t *req_pkt = (uint8_t *)p->payload;
                         memset(req_pkt, 0, NTP_MSG_LEN);
                         req_pkt[0] = 0x1B; // LI=0, VN=3, Mode=3 (Client)
                         
                         cyw43_arch_lwip_begin();
-                        udp_sendto(pcb, p, &ntp_ip, NTP_PORT);
+                        udp_sendto(pcb, p, &req.ip, NTP_PORT);
                         cyw43_arch_lwip_end();
                         pbuf_free(p);
                         
                         // Wait for response
                         int timeout = 0;
-                        while (!req.complete && timeout++ < 5000) sleep_ms(1);
+                        while (!req.complete && timeout++ < 5000) {
+                            cyw43_arch_poll();
+                            sleep_ms(1);
+                        }
                     }
                     
                     udp_remove(pcb);
