@@ -37,6 +37,7 @@
 #define CMD_FS_DELETE_CONTENTS  0x26 // Args: [Path]. Delete all files in dir
 #define CMD_FS_TREE     0x27  // Args: [Path]. Returns: Stream of tree text
 #define CMD_FS_SPACE    0x28  // Args: None. Returns: [total(4)][used(4)][bsize(4)]
+#define CMD_FS_LIST_SIZE 0x29 // Args: [Path]. Returns: [Size(4)]
 
 // --- NETWORK COMMANDS (0x30 - 0x4F) ---
 #define CMD_NET_STATUS     0x30  // Args: None. Returns: Status (0=Down, 1=Up)

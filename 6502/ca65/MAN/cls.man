@@ -1,0 +1,15 @@
+NAME
+  CLS - Clear Screen (External)
+
+SYNOPSIS
+  CLS
+
+DESCRIPTION
+  Clears the terminal screen and
+  moves cursor to home position.
+
+EXAMPLES
+  CLS
+
+SEE ALSO
+  ECHO

@@ -1,0 +1,15 @@
+NAME
+  BENCH - Filesystem Benchmark (External)
+
+SYNOPSIS
+  BENCH
+
+DESCRIPTION
+  Runs a read/write benchmark on the
+  filesystem to test performance.
+
+EXAMPLES
+  BENCH
+
+SEE ALSO
+  DF

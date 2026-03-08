@@ -1,0 +1,19 @@
+NAME
+  GET - Download File (External)
+
+SYNOPSIS
+  GET [remote] [local]
+
+DESCRIPTION
+  Downloads a file from the configured
+  file server via HTTP.
+  
+  If local path is omitted, saves to
+  current directory.
+
+EXAMPLES
+  GET /readme.txt
+  GET /bin/game.bin game.bin
+
+SEE ALSO
+  PUT, SETSERVER

@@ -1,0 +1,16 @@
+NAME
+  WEATHER - Weather Report (External)
+
+SYNOPSIS
+  WEATHER [location]
+  WEATHER SETDEFAULT [location]
+
+DESCRIPTION
+  Streams a weather report from wttr.in.
+
+EXAMPLES
+  WEATHER
+  WEATHER London
+
+SEE ALSO
+  NEWS

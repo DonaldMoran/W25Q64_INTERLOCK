@@ -1,0 +1,16 @@
+NAME
+  PING - Test Pico Connection (Internal)
+
+SYNOPSIS
+  PING
+
+DESCRIPTION
+  Sends a ping request to the Bridge
+  Pico W to verify the parallel bus
+  connection.
+
+EXAMPLES
+  PING
+
+SEE ALSO
+  PICORBT

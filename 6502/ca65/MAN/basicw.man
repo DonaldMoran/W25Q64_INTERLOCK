@@ -1,0 +1,16 @@
+NAME
+  BASICW - BASIC Warm Start (External)
+
+SYNOPSIS
+  BASICW
+
+DESCRIPTION
+  Warm starts Microsoft BASIC,
+  attempting to preserve the program
+  currently in memory.
+
+EXAMPLES
+  BASICW
+
+SEE ALSO
+  BASIC

@@ -1,0 +1,16 @@
+NAME
+  CP - Copy File (External)
+
+SYNOPSIS
+  CP [src] [dst]
+
+DESCRIPTION
+  External version of the copy command.
+  Useful if the internal command is
+  unavailable or for scripting.
+
+EXAMPLES
+  CP /ETC/CONFIG.CFG /ETC/BACKUP.CFG
+
+SEE ALSO
+  COPY, MV

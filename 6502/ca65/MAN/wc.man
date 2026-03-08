@@ -1,0 +1,15 @@
+NAME
+  WC - Word Count (External)
+
+SYNOPSIS
+  WC [file]
+
+DESCRIPTION
+  Counts lines, words, and characters
+  in a file.
+
+EXAMPLES
+  WC DOCUMENT.TXT
+
+SEE ALSO
+  STAT

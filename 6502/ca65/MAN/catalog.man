@@ -1,0 +1,24 @@
+NAME
+  CATALOG - Stream directory contents (External)
+
+SYNOPSIS
+  CATALOG [path]
+
+DESCRIPTION
+  Lists files and subdirectories in
+  the specified path using a streaming
+  protocol. Unlike DIR, it is not
+  limited by memory buffers and can
+  list directories of any size.
+
+EXAMPLES
+  CATALOG
+  CATALOG /USR/LIB
+
+NOTES
+  Use this command if DIR fails or
+  truncates output due to directory
+  size.
+
+SEE ALSO
+  DIR, LS, TREE

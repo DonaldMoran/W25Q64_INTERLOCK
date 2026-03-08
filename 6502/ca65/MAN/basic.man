@@ -1,0 +1,16 @@
+NAME
+  BASIC - Microsoft BASIC (External)
+
+SYNOPSIS
+  BASIC
+
+DESCRIPTION
+  Starts the Microsoft BASIC interpreter.
+  
+  Type SYSTEM to exit back to shell.
+
+EXAMPLES
+  BASIC
+
+SEE ALSO
+  BASICW

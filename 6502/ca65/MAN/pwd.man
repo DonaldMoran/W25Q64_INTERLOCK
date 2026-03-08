@@ -1,0 +1,15 @@
+NAME
+  PWD - Print Working Directory (Internal)
+
+SYNOPSIS
+  PWD
+
+DESCRIPTION
+  Displays the full path of the current
+  working directory.
+
+EXAMPLES
+  PWD
+
+SEE ALSO
+  CD, DIR

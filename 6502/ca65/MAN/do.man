@@ -1,0 +1,15 @@
+NAME
+  DO - Execute Script (External)
+
+SYNOPSIS
+  DO [file]
+
+DESCRIPTION
+  Executes a batch script containing
+  a list of shell commands.
+
+EXAMPLES
+  DO STARTUP.BAT
+
+SEE ALSO
+  ECHO

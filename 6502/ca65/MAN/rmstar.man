@@ -1,0 +1,18 @@
+NAME
+  RM* - Delete All Files (External)
+
+SYNOPSIS
+  RM*
+
+DESCRIPTION
+  Deletes all files in the current
+  directory. Does not delete
+  subdirectories.
+  
+  Prompts for confirmation.
+
+EXAMPLES
+  RM*
+
+SEE ALSO
+  RM, RM-FR

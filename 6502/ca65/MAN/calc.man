@@ -1,0 +1,16 @@
+NAME
+  CALC - Calculator (External)
+
+SYNOPSIS
+  CALC
+
+DESCRIPTION
+  Starts the retro calculator utility.
+  Supports Hex/Dec/Bin conversion and
+  basic arithmetic.
+
+EXAMPLES
+  CALC
+
+SEE ALSO
+  BASIC

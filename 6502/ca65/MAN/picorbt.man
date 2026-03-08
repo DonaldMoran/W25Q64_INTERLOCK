@@ -1,0 +1,16 @@
+NAME
+  PICORBT - Reboot Pico (External)
+
+SYNOPSIS
+  PICORBT
+
+DESCRIPTION
+  Reboots the Bridge Pico W.
+  Useful if the network stack or
+  filesystem becomes unresponsive.
+
+EXAMPLES
+  PICORBT
+
+SEE ALSO
+  PING

@@ -1,0 +1,18 @@
+NAME
+  RM - Remove file (Internal)
+
+SYNOPSIS
+  RM  [path]
+  DEL [path]
+
+DESCRIPTION
+  Deletes a file or an empty directory.
+  To remove a directory with contents,
+  use RM-FR.
+
+EXAMPLES
+  RM FILE.TXT
+  DEL OLD.BIN
+
+SEE ALSO
+  RM-FR, RM*, MKDIR

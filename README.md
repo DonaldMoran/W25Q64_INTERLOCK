@@ -106,6 +106,7 @@ The 65C02 computer issues commands, which are transmitted through the 6522 VIA t
 | `DO [FILE]` | | Execute batch script (External) |
 | `WRITE [FILE]` | | Text Editor (External) |
 | `BENCH` | | Run filesystem benchmark (External) |
+| `DF` | | Disk Free space usage (External) |
 | `SETSERVER [IP:PORT]` | | Set/Get file server address (External) |
 | `GET [REMOTE] [LOCAL]` | | Download file via HTTP (External) |
 | `PUT [LOCAL] [REMOTE]` | | Upload file via HTTP (External) |
@@ -113,11 +114,14 @@ The 65C02 computer issues commands, which are transmitted through the 6522 VIA t
 | `CP [SRC] [DST]` | | Copy file (External) |
 | `RM-FR [PATH]` | | Recursive delete directory (External) |
 | `RM*` | | Delete all files in current dir (External) |
-| `TREE [PATH]` | | Visualize directory structure (External) |
+| `TREE [PATH]` | | Visualize directory structure (Streaming) (External) |
+| `RLIST [PATH]` | | List remote directory (Streaming) (External) |
 | `PICORBT` | | Reboot Bridge Pico (External) |
 | `CATALOG [PATH]` | | Streaming directory list for any size (External) |
 | `BASIC` | | Start MSBASIC (External). Displays a "Don's DOS BASIC" splash screen. |
+| `BASICW` | | Warm start MSBASIC (External) |
 | `KRUSADER` | | Start Krusader Assembler (External) |
+| `KRUSADERW` | | Warm start Krusader (External) |
 | `WOZMON` | | Start WozMon Monitor (External) |
 | `HEAD [FILE]` | | Print first 10 lines of file (External) |
 | `HEX [FILE]` | | Hex dump of file (External) |
@@ -127,14 +131,19 @@ The 65C02 computer issues commands, which are transmitted through the 6522 VIA t
 | `DIFF [FILE1] [FILE2]` | | Compare two files (External) |
 | `CALC` | | Retro Calculator (External) |
 | `CLS` | | Clear Screen and return home (External) |
+| `NEWS [ARGS]` | | Stream RSS headlines (External) |
+| `WEATHER [LOC]` | | Stream Weather report (External) |
+| `MAN [CMD]` | | Display manual page (External) |
 
 ### Design Note: `DIR`/`LS` vs `CATALOG`
 
 A key design choice has been made to balance features against the shell's limited ROM space (`< 4KB`).
 
-- **`DIR` (aliased as `LS`)** is a built-in command that uses a fixed 1024-byte buffer to display directory listings. This keeps the core shell small and fast for common use cases. It will fail if a directory listing exceeds 1024 bytes.
+- **`DIR` (aliased as `LS`)** is a built-in command whose output is limited by a 1024-byte response buffer on the 6502 side. This keeps the core shell small and fast for common use cases. For larger directories, the `CATALOG` command should be used.
 
 - **`CATALOG`** is a new transient command that implements a streaming protocol. It reads the directory listing byte-by-byte and can therefore handle directories of any size without being limited by a buffer. It is the recommended command for very large directories.
+
+> **Example:** The `/MAN/` directory, which contains manual pages for all commands, contains more files than `DIR` can buffer. Use `CATALOG /MAN` to view its full contents.
 
 ### Command Protocol Reference
 
@@ -414,8 +423,12 @@ The Krusader assembler has been patched with new file I/O commands:
 
 ## 9. Memory Management
 
-- `http_buf` – 32KB static buffer for HTTP downloads  
-- `savemem_buf` – 256-byte streaming buffer for flash operations  
+-
+- **Pico:** A 4KB `resp_buf` is used for efficient, block-aligned streaming I/O (`SAVEMEM`, `LOADMEM`, `GET`).
+- **6502:** A 1KB `RESP_BUFF` (located at `$0400` in RAM) receives responses for non-streaming, built-in shell commands.
+  - **`DIR` / `LS`:** This is the primary command limited by the buffer. A pre-flight check prevents directory listings larger than 1KB from being requested, ensuring bus stability.
+  - **Other commands:** `PING`, `STAT` (used internally by many commands), and other simple queries also use this buffer, but their responses are very small and not subject to overflow.
+  - **Streaming Commands** (`CATALOG`, `TYPE`, `RUN`, `NEWS`, etc.) bypass this buffer entirely, reading data byte-by-byte.
 - LittleFS handles internal flash allocation automatically  
 
 ---
@@ -516,11 +529,11 @@ Implement your own simple parsing
 ```assembly
 ; Zero Page Assignments
 ; ---------------------------------------------------------------------------
-;The shell reserves `$50-$57`. Transient commands **MUST** use `$58-$7F` only.
+;The shell reserves `$50-$57`. Transient commands **MUST** use `$58-$5F` only.
 
 ```asm
 $50-$57 RESERVED FOR SHELL - DO NOT USE
-$58-$7F AVAILABLE FOR TRANSIENT COMMANDS
+$58-$5F AVAILABLE FOR TRANSIENT COMMANDS
 ```
 
 ```assembly
@@ -854,7 +867,9 @@ Done
 
 ```text
 
-Exit via Ctrl+Z or Ctrl+X
+*   **Telnet Client:** A simple terminal emulator to connect to BBSs.
+*   **IRC Client:** Read and post to IRC channels.
+
 ```
 
 ## 18. Important Rules Summary
@@ -1190,7 +1205,21 @@ To test changes to the shell without burning a new ROM:
     - **Unified Buffer Architecture:** Removed dedicated `savemem_buf` (256B) and `http_buf` (32KB). Increased the general-purpose `resp_buf` to 4KB. This saves ~28KB of RAM while aligning buffer sizes with the filesystem block size.
     - **Unlimited HTTP GET:** Refactored `CMD_NET_HTTP_GET` to stream data directly to the filesystem with on-the-fly header stripping. This removes the previous 32KB file size limit, allowing downloads of any size supported by the disk.
     - **Optimized Memory Operations:** Updated `SAVEMEM` and `LOADMEM` to use the 4KB `resp_buf`, reducing filesystem overhead by writing/reading in 4KB chunks instead of 256-byte chunks.
-    - **Enhanced Directory Listings:** The larger `resp_buf` allows the built-in `DIR` command to list significantly more files before truncation.
+    - **Enhanced Streaming Performance:** The 4KB buffer aligns with the flash block size, significantly improving the performance and reducing flash wear for streaming operations like `SAVEMEM`, `LOADMEM`, and `GET`.
 
 6. **Transient Command Standardization**
     - **Updated Blueprint:** Revised the "Definitive Transient Command Pattern" in the documentation to include critical CPU sanitization (`CLD`, `SEI`) and a reusable argument parsing routine. This establishes a robust standard for all future command development.
+
+### 🚩 Milestone: Local Commit `e394359`. Development continues from this point
+
+**Accomplishments:**
+
+1. **New Transient Command: MAN (Manual Viewer)**
+    - **Documentation System:** Implemented a Unix-like `MAN` command to display help pages for system commands.
+    - **Viewer Logic:** The command loads text files from the `/MAN/` directory (e.g., `DIR.MAN`) and displays them with pagination (`--More--`).
+    - **Read-Only Safety:** Explicitly opens files in Read-Only mode to prevent accidental creation of empty manual pages if a typo is made.
+    - **Content:** Created comprehensive manual pages for all 45+ system commands, documenting syntax, description, and examples.
+
+2. **`DIR` Command Stability:**
+    - **Pre-flight Check:** Implemented a pre-flight size check for the `DIR` command. The shell now queries the directory listing size from the Pico first using a new `CMD_FS_LIST_SIZE` opcode.
+    - **Bus Synchronization:** If the size exceeds the 1KB buffer, the shell displays the `"DIR BUFFER FULL. Use CATALOG."` message and aborts gracefully *before* any data is sent. This prevents bus desynchronization and ensures system stability when listing large directories.

@@ -14,6 +14,8 @@
 #include "pico/util/datetime.h"
 #include "w25q64.h"
 
+#define CMD_FS_LIST_SIZE 0x29
+
 // --- Wi-Fi Configuration ---
 #define WIFI_SSID "YOUR_SSID"        // Replace with your Wi-Fi SSID
 #define WIFI_PASSWORD "YOUR_WIFI_PASS" // Replace with your Wi-Fi password
@@ -931,6 +933,48 @@ int main() {
                         
                         resp_buf[0] = STATUS_OK;
                         payload_len = written;
+                    }
+                }
+                break;
+
+            case CMD_FS_LIST_SIZE:
+                {
+                    if (!fs_mounted) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
+                    lfs_dir_t dir;
+                    struct lfs_info info;
+                    const char *path = (arg_len == 0) ? "/" : (const char *)arg_buf;
+
+                    int err = lfs_dir_open(&lfs, &dir, path);
+                    if (err) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                    } else {
+                        uint32_t total_len = 0;
+                        while (true) {
+                            int res = lfs_dir_read(&lfs, &dir, &info);
+                            if (res <= 0) break;
+                            if (strcmp(info.name, ".") == 0 || strcmp(info.name, "..") == 0) continue;
+
+                            int len;
+                            if (info.type == LFS_TYPE_DIR) {
+                                len = snprintf(NULL, 0, "%-12s   <DIR>\n", info.name);
+                            } else {
+                                len = snprintf(NULL, 0, "%-12s %7ld\n", info.name, info.size);
+                            }
+                            total_len += len;
+                        }
+                        lfs_dir_close(&lfs, &dir);
+                        
+                        total_len++; // Account for null terminator
+                        
+                        resp_buf[0] = STATUS_OK;
+                        memcpy(payload_ptr, &total_len, 4);
+                        payload_len = 4;
                     }
                 }
                 break;

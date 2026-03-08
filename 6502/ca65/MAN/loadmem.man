@@ -1,0 +1,17 @@
+NAME
+  LOADMEM - Load File to Memory (Internal)
+
+SYNOPSIS
+  LOADMEM [addr] [file]
+
+DESCRIPTION
+  Loads a file from the filesystem into
+  6502 memory at the specified address.
+  
+  [addr] is a hex address.
+
+EXAMPLES
+  LOADMEM 1000 PROG.BIN
+
+SEE ALSO
+  SAVEMEM, RUN

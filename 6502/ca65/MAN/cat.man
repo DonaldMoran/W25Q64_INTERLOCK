@@ -1,0 +1,17 @@
+NAME
+  CAT - Concatenate/Display file (External)
+
+SYNOPSIS
+  CAT [file]
+
+DESCRIPTION
+  Displays the contents of a file to
+  standard output. Unlike TYPE, it does
+  not auto-detect binary files for hex
+  dumping.
+
+EXAMPLES
+  CAT README.TXT
+
+SEE ALSO
+  TYPE, HEAD, TAIL

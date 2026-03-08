@@ -185,6 +185,8 @@ start:
     jsr read_byte
     cmp #STATUS_OK
     beq @open_ok
+    jsr read_byte ; consume len lo
+    jsr read_byte ; consume len hi
     jmp file_error
 
 @open_ok:
@@ -217,7 +219,11 @@ start:
     sta VIA_DDRA
     jsr read_byte
     cmp #STATUS_OK
-    bne @close_file
+    beq @read_len_check
+    jsr read_byte ; consume len lo
+    jsr read_byte ; consume len hi
+    jmp @close_file
+@read_len_check:
     jsr read_byte
     sta read_len
     jsr read_byte ; len hi

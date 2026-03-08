@@ -1,0 +1,16 @@
+NAME
+  MKDIR - Make Directory (Internal)
+
+SYNOPSIS
+  MKDIR [path]
+
+DESCRIPTION
+  Creates a new directory at the
+  specified path.
+
+EXAMPLES
+  MKDIR /USR/SRC
+  MKDIR NEWDIR
+
+SEE ALSO
+  RM-FR, CD

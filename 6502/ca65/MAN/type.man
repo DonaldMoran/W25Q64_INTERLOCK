@@ -1,0 +1,20 @@
+NAME
+  TYPE - Display file contents (Internal)
+
+SYNOPSIS
+  TYPE [file]
+
+DESCRIPTION
+  Displays the contents of a file.
+  If the file extension is .BIN, it
+  displays a hex dump.
+  
+  This is an internal command. For
+  large files, consider using CAT.
+
+EXAMPLES
+  TYPE README.TXT
+  TYPE PROG.BIN
+
+SEE ALSO
+  CAT, HEAD, TAIL, HEX

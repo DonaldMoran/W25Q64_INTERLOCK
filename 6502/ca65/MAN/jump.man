@@ -1,0 +1,15 @@
+NAME
+  JUMP - Jump to Address (Internal)
+
+SYNOPSIS
+  JUMP [addr]
+
+DESCRIPTION
+  Transfers execution control to the
+  specified hex address.
+
+EXAMPLES
+  JUMP FF00
+
+SEE ALSO
+  RUN, EXIT
