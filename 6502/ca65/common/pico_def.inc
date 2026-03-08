@@ -60,6 +60,9 @@ CMD_NET_HTTP_GET   = $34
 CMD_NET_HTTP_POST  = $35
 CMD_NET_TIME       = $36
 CMD_DOWNLOAD_SIMPLE = $37
+CMD_NET_NEWS       = $38
+CMD_NET_WEATHER    = $39
+CMD_NET_RLIST      = $3A
 
 ; ---------------------------------------------------------------------------
 ; Status Codes

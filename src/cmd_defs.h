@@ -47,6 +47,9 @@
 #define CMD_NET_HTTP_POST  0x35  // Args: [IP]\0[Port]\0[Src]\0[Dst]. Returns: Status
 #define CMD_NET_TIME       0x36  // Args: None. Returns: Time String
 #define CMD_DOWNLOAD_SIMPLE 0x37  // Args: [RemotePath]\0[LocalPath]. Returns: File Content (raw)
+#define CMD_NET_NEWS       0x38  // Args: [Host]\0[Port]\0[Path] (optional). Returns: Framed stream
+#define CMD_NET_WEATHER    0x39  // Args: [Location] (optional). Returns: Framed stream
+#define CMD_NET_RLIST      0x3A  // Args: [IP]\0[Port]\0[RemotePath]. Returns: Framed stream
 
 // --- STATUS CODES ---
 #define STATUS_OK       0x00

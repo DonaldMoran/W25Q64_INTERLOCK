@@ -14,7 +14,7 @@ ACIA_DATA    = $5000
 t_str_ptr1   = $5A
 t_line_cnt  = $5C ; Replaces unused t_str_ptr2
 t_ptr_temp   = $5E
-t_count      = $58 ; 2 bytes for length
+t_len_cnt    = $58 ; 2 bytes for length
 
 ; ---------------------------------------------------------------------------
 ; System calls
@@ -91,36 +91,44 @@ start:
     lda #$00
     sta VIA_DDRA    ; Set Port A to Input
 
+    ; Wait for initial response from Pico (Status + 2 bytes Len)
     jsr read_byte   ; Status
+    pha             ; Save status
+    jsr read_byte   ; consume len_lo
+    jsr read_byte   ; consume len_hi
+    pla             ; Restore status
     cmp #$00        ; STATUS_OK
     bne @error
 
-    jsr read_byte   ; Len Lo
-    sta t_count
-    jsr read_byte   ; Len Hi
-    sta t_count+1
+@read_frame_len:
+    jsr read_byte
+    sta t_len_cnt
+    jsr read_byte
+    sta t_len_cnt+1
 
-@stream_loop:
-    lda t_count
-    ora t_count+1
+    lda t_len_cnt
+    ora t_len_cnt+1
     beq @done
 
+@read_frame_data:
     jsr read_byte
     jsr paging_outch ; Print char with pagination
 
-    ; Decrement counter
-    lda t_count
-    bne @dec_lo
-    dec t_count+1
-@dec_lo:
-    dec t_count
-    jmp @stream_loop
+    sec
+    lda t_len_cnt
+    sbc #1
+    sta t_len_cnt
+    lda t_len_cnt+1
+    sbc #0
+    sta t_len_cnt+1
+
+    lda t_len_cnt
+    ora t_len_cnt+1
+    bne @read_frame_data
+
+    jmp @read_frame_len
 
 @error:
-    ; Consume 2 bytes if error (LenLo, LenHi) to reset bus
-    jsr read_byte
-    jsr read_byte
-    
     lda #<msg_fail
     sta t_str_ptr1
     lda #>msg_fail
@@ -131,23 +139,6 @@ start:
 @done:
     lda #$FF
     sta VIA_DDRA    ; Restore Port A to Output
-
-    ; -----------------------------------------------------------------------
-    ; Cleanup: Delete the temporary file
-    ; -----------------------------------------------------------------------
-    ldx #0
-@copy_tmp_name:
-    lda str_tmp_file, x
-    sta ARG_BUFF, x
-    beq @tmp_name_done
-    inx
-    jmp @copy_tmp_name
-@tmp_name_done:
-    stx ARG_LEN
-
-    lda #CMD_FS_REMOVE
-    sta CMD_ID
-    jsr pico_send_request
 
     pla
     tay
@@ -207,7 +198,6 @@ print_string:
 
 .segment "RODATA"
 msg_fail:  .asciiz "Error: Failed to list tree"
-str_tmp_file: .asciiz "/tree.tmp"
 msg_more:  .asciiz "--More--"
 
 ; ---------------------------------------------------------------------------

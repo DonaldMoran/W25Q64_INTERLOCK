@@ -55,14 +55,12 @@ pico_state_t current_state = STATE_IDLE;
 uint16_t stream_bytes_remaining = 0;
 lfs_file_t stream_file;
 bool stream_file_is_open = false; // Track if stream_file is open
-#define SAVEMEM_BUF_SIZE 256
-uint8_t savemem_buf[SAVEMEM_BUF_SIZE];
 uint16_t savemem_buf_pos = 0;
 uint16_t savemem_buf_fill = 0;
 
 // --- HTTP CLIENT HELPERS ---
-#define HTTP_BUF_SIZE 32768
-uint8_t http_buf[HTTP_BUF_SIZE]; // Static buffer for downloads
+#define HTTP_BUF_SIZE 4096
+uint8_t http_buf[HTTP_BUF_SIZE]; // Reduced buffer for chunks
 
 // File server IP and Port (hardcoded on Pico side)
 #define FILE_SERVER_IP "192.168.100.197"
@@ -76,6 +74,10 @@ typedef struct {
     // DNS fields
     bool dns_done;
     ip_addr_t ip;
+    // File streaming
+    lfs_file_t *file;
+    bool file_open;
+    int header_state; // 0=headers, 1=cr, 2=crlf, 3=crlfcr, 4=body
 } http_req_t;
 
 static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
@@ -85,15 +87,55 @@ static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
         return ERR_OK;
     }
     if (p->tot_len > 0) {
-        if (req->received + p->tot_len <= HTTP_BUF_SIZE) {
-            pbuf_copy_partial(p, http_buf + req->received, p->tot_len, 0);
-            req->received += p->tot_len;
-            tcp_recved(tpcb, p->tot_len);
+        struct pbuf *q = p;
+        
+        while (q) {
+            uint8_t *data = (uint8_t*)q->payload;
+            uint16_t len = q->len;
+            uint16_t start = 0;
+
+            // Stream-strip headers if writing to file
+            if (req->file_open && req->header_state < 4) {
+                for (uint16_t i = 0; i < len; i++) {
+                    char c = data[i];
+                    if (req->header_state == 0 && c == '\r') req->header_state = 1;
+                    else if (req->header_state == 1 && c == '\n') req->header_state = 2;
+                    else if (req->header_state == 2 && c == '\r') req->header_state = 3;
+                    else if (req->header_state == 3 && c == '\n') {
+                        req->header_state = 4;
+                        start = i + 1;
+                        break;
+                    } else {
+                        // Reset if sequence broken, but handle \r case
+                        req->header_state = (c == '\r') ? 1 : 0;
+                    }
+                }
+            }
+
+            if (req->file_open) {
+                if (req->header_state == 4) {
+                    uint16_t body_len = len - start;
+                    if (body_len > 0) {
+                        lfs_file_write(&lfs, req->file, data + start, body_len);
+                    }
+                }
+            } else if (req->received + len <= HTTP_BUF_SIZE) {
+                // Buffer mode (CMD_DOWNLOAD_SIMPLE)
+                memcpy(http_buf + req->received, data, len);
+                req->received += len;
+            }
+            q = q->next;
+        }
+        
+        tcp_recved(tpcb, p->tot_len);
+        
+        if (!req->file_open && req->received >= HTTP_BUF_SIZE) {
+             // Buffer full in memory mode
+             req->error = true;
+             req->complete = true;
+             tcp_abort(tpcb);
+             return ERR_ABRT;
         } else {
-            req->error = true; // Buffer overflow
-            req->complete = true;
-            tcp_abort(tpcb);
-            return ERR_ABRT;
         }
     }
     pbuf_free(p);
@@ -126,6 +168,171 @@ static void http_dns_found_cb(const char *name, const ip_addr_t *ipaddr, void *c
         req->error = true; // DNS failed
         req->dns_done = true;
     }
+}
+
+// --- GENERIC STREAMING HELPERS (NEW) ---
+
+void stream_send_chunk(const uint8_t *data, uint16_t len) {
+    bus_write_byte(len & 0xFF);
+    bus_write_byte((len >> 8) & 0xFF);
+    for (uint16_t i = 0; i < len; i++) {
+        bus_write_byte(data[i]);
+    }
+}
+
+void stream_end() {
+    bus_write_byte(0x00);
+    bus_write_byte(0x00);
+}
+
+// --- NEWS STREAMING HELPERS (NEW) ---
+
+typedef struct {
+    bool complete;
+    bool error;
+    bool connected; // Added for connection tracking
+    // XML parsing state
+    char parse_buf[512];
+    uint16_t parse_fill;
+    bool in_title;
+    // Entity decoding state
+    char entity_buf[10];
+    uint8_t entity_fill;
+    // Header stripping state
+    int header_state; // 0=headers, 1=cr, 2=crlf, 3=crlfcr, 4=body
+} news_req_t;
+
+static err_t weather_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
+    news_req_t *req = (news_req_t *)arg; // Reuse news_req_t as it has the flags we need
+    if (!p) {
+        req->complete = true;
+        return ERR_OK;
+    }
+
+    if (p->tot_len > 0) {
+        struct pbuf *q = p;
+        while (q) {
+            uint8_t *data = (uint8_t*)q->payload;
+            uint16_t len = q->len;
+            uint16_t start = 0;
+
+            if (req->header_state < 4) {
+                for (uint16_t i = 0; i < len; i++) {
+                    char c = data[i];
+                    if (req->header_state == 0 && c == '\r') req->header_state = 1;
+                    else if (req->header_state == 1 && c == '\n') req->header_state = 2;
+                    else if (req->header_state == 2 && c == '\r') req->header_state = 3;
+                    else if (req->header_state == 3 && c == '\n') {
+                        req->header_state = 4;
+                        start = i + 1;
+                        break;
+                    } else {
+                        req->header_state = 0; // Reset if sequence broken
+                    }
+                }
+            }
+
+            if (req->header_state == 4 && start < len) {
+                stream_send_chunk(data + start, len - start);
+            }
+            q = q->next;
+        }
+        tcp_recved(tpcb, p->tot_len);
+    }
+    pbuf_free(p);
+    return ERR_OK;
+}
+
+static err_t news_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
+    news_req_t *req = (news_req_t *)arg;
+    if (!p) {
+        req->complete = true;
+        return ERR_OK;
+    }
+
+    if (p->tot_len > 0) {
+        struct pbuf *q = p;
+        while (q) {
+            // Simple streaming parser for <title> tags
+            for (int i = 0; i < q->len; i++) {
+                char c = ((char*)q->payload)[i];
+
+                char lower_c = (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
+
+                if (req->in_title) {
+                    if (c == '<') { // End of title
+                        // Flush any pending entity buffer as raw text if incomplete
+                        if (req->entity_fill > 0) {
+                            for(int k=0; k<req->entity_fill; k++) {
+                                if (req->parse_fill < sizeof(req->parse_buf) - 1)
+                                    req->parse_buf[req->parse_fill++] = req->entity_buf[k];
+                            }
+                            req->entity_fill = 0;
+                        }
+
+                        req->parse_buf[req->parse_fill] = '\0';
+                        stream_send_chunk((uint8_t*)req->parse_buf, req->parse_fill);
+                        req->in_title = false;
+                    } else if (c == '&') {
+                        // Start of entity
+                        req->entity_buf[0] = '&';
+                        req->entity_fill = 1;
+                    } else if (req->entity_fill < sizeof(req->entity_buf) && req->entity_fill > 0) {
+                        // Inside entity (or just started)
+                        // Note: The '&' itself is not stored in entity_buf, only the chars after it
+                        req->entity_buf[req->entity_fill++] = c;
+                        if (c == ';') {
+                            // End of entity, decode it
+                            req->entity_buf[req->entity_fill] = 0;
+                            char decoded = 0;
+                            if (strcmp(req->entity_buf, "&apos;") == 0) decoded = '\'';
+                            else if (strcmp(req->entity_buf, "&quot;") == 0) decoded = '"';
+                            else if (strcmp(req->entity_buf, "&amp;") == 0) decoded = '&';
+                            else if (strcmp(req->entity_buf, "&lt;") == 0) decoded = '<';
+                            else if (strcmp(req->entity_buf, "&gt;") == 0) decoded = '>';
+                            
+                            if (decoded) {
+                                if (req->parse_fill < sizeof(req->parse_buf) - 1)
+                                    req->parse_buf[req->parse_fill++] = decoded;
+                            }
+                            req->entity_fill = 0; // Reset
+                        }
+                    } else if (req->parse_fill < sizeof(req->parse_buf) - 1) {
+                        // Normal char
+                        req->parse_buf[req->parse_fill++] = c;
+                    }
+                } else {
+                    req->parse_buf[req->parse_fill++] = lower_c;
+                    if (req->parse_fill >= 7) { // <title> is 7 chars
+                        if (memcmp(&req->parse_buf[req->parse_fill - 7], "<title>", 7) == 0) {
+                            req->in_title = true;
+                            req->parse_fill = 0;
+                        }
+                    }
+                    if (req->parse_fill >= sizeof(req->parse_buf)) {
+                        // Shift buffer to keep last few chars for tag detection
+                        memmove(req->parse_buf, &req->parse_buf[req->parse_fill - 7], 7);
+                        req->parse_fill = 7;
+                    }
+                }
+            }
+            q = q->next;
+        }
+        tcp_recved(tpcb, p->tot_len);
+    }
+    pbuf_free(p);
+    return ERR_OK;
+}
+
+static err_t news_connected_cb(void *arg, struct tcp_pcb *tpcb, err_t err) {
+    news_req_t *req = (news_req_t *)arg;
+    if (err == ERR_OK) {
+        req->connected = true;
+    } else {
+        req->error = true;
+        req->complete = true;
+    }
+    return ERR_OK;
 }
 
 // --- NTP HELPERS ---
@@ -269,7 +476,7 @@ int delete_directory_contents(lfs_t *lfs, const char *path) {
 }
 
 // --- TREE GENERATOR HELPER ---
-void generate_tree(lfs_t *lfs, const char *path, lfs_file_t *file, int depth) {
+void stream_tree_recursive(lfs_t *lfs, const char *path, int depth) {
     lfs_dir_t dir;
     struct lfs_info info;
     if (lfs_dir_open(lfs, &dir, path) != 0) return;
@@ -279,19 +486,21 @@ void generate_tree(lfs_t *lfs, const char *path, lfs_file_t *file, int depth) {
 
         char line[256];
         int indent = depth * 2;
+        if (indent > 64) indent = 64; // Cap indentation to prevent buffer overflow
+        
         // Simple indentation
         for(int i=0; i<indent; i++) line[i] = ' ';
         
         if (info.type == LFS_TYPE_DIR) {
             int len = snprintf(line + indent, sizeof(line) - indent, "[%s]\n", info.name);
-            lfs_file_write(lfs, file, line, indent + len);
+            stream_send_chunk((uint8_t*)line, indent + len);
             
             char subpath[256];
             snprintf(subpath, sizeof(subpath), "%s/%s", path, info.name);
-            generate_tree(lfs, subpath, file, depth + 1);
+            stream_tree_recursive(lfs, subpath, depth + 1);
         } else {
             int len = snprintf(line + indent, sizeof(line) - indent, "%s (%ld)\n", info.name, info.size);
-            lfs_file_write(lfs, file, line, indent + len);
+            stream_send_chunk((uint8_t*)line, indent + len);
         }
     }
     lfs_dir_close(lfs, &dir);
@@ -330,7 +539,7 @@ int main() {
     uint8_t arg_buf[256];
     
     // Buffers for Response
-    uint8_t resp_buf[1024]; // Large enough for a directory listing
+    uint8_t resp_buf[4096]; // Increased for larger DIR listings and faster streaming
 
     // --- Auto-mount Filesystem on Boot ---
     int boot_mount_err = lfs_mount(&lfs, &w25q_cfg);
@@ -355,12 +564,12 @@ int main() {
     // --- NEW: Handle streaming state ---
     if (current_state == STATE_SAVEMEM_STREAM) {
         uint8_t data = bus_read_byte();
-        savemem_buf[savemem_buf_pos++] = data;
+        resp_buf[savemem_buf_pos++] = data;
         stream_bytes_remaining--;
 
         // Write to file if buffer is full OR if this is the last data byte
-        if (savemem_buf_pos == SAVEMEM_BUF_SIZE || stream_bytes_remaining == 0) {
-            int written = lfs_file_write(&lfs, &stream_file, savemem_buf, savemem_buf_pos);
+        if (savemem_buf_pos == sizeof(resp_buf) || stream_bytes_remaining == 0) {
+            int written = lfs_file_write(&lfs, &stream_file, resp_buf, savemem_buf_pos);
             if (written != savemem_buf_pos) {
                 lfs_file_close(&lfs, &stream_file); // Attempt to close
                 stream_file_is_open = false;
@@ -399,18 +608,18 @@ int main() {
         if (stream_bytes_remaining > 0) {
             // Refill buffer if empty
             if (savemem_buf_pos >= savemem_buf_fill) {
-                lfs_ssize_t read = lfs_file_read(&lfs, &stream_file, savemem_buf, 
-                                               (stream_bytes_remaining > SAVEMEM_BUF_SIZE) ? SAVEMEM_BUF_SIZE : stream_bytes_remaining);
+                lfs_ssize_t read = lfs_file_read(&lfs, &stream_file, resp_buf, 
+                                               (stream_bytes_remaining > sizeof(resp_buf)) ? sizeof(resp_buf) : stream_bytes_remaining);
                 if (read <= 0) {
                     // Error or unexpected EOF. Fill with 0 to prevent 6502 hang.
-                    memset(savemem_buf, 0, SAVEMEM_BUF_SIZE);
-                    read = (stream_bytes_remaining > SAVEMEM_BUF_SIZE) ? SAVEMEM_BUF_SIZE : stream_bytes_remaining;
+                    memset(resp_buf, 0, sizeof(resp_buf));
+                    read = (stream_bytes_remaining > sizeof(resp_buf)) ? sizeof(resp_buf) : stream_bytes_remaining;
                 }
                 savemem_buf_fill = read;
                 savemem_buf_pos = 0;
             }
             
-            bus_write_byte(savemem_buf[savemem_buf_pos++]);
+            bus_write_byte(resp_buf[savemem_buf_pos++]);
             stream_bytes_remaining--;
         } 
         
@@ -791,48 +1000,15 @@ int main() {
 
                     const char *path = (arg_len == 0) ? "/" : (const char *)arg_buf;
 
-                    if (stream_file_is_open) {
-                        lfs_file_close(&lfs, &stream_file);
-                        stream_file_is_open = false;
-                    }
-
-                    // Try to remove temp file first to ensure clean state
-                    lfs_remove(&lfs, "/tree.tmp");
-                    
-                    // Open temp file to store the tree output
-                    lfs_file_t tfile;
-                    int err = lfs_file_open(&lfs, &tfile, "/tree.tmp", LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
-                    if (err < 0) {
-                        printf("TREE: Failed to open /tree.tmp for write (%d)\n", err);
-                        resp_buf[0] = STATUS_ERR;
-                        payload_len = 0;
-                        break;
-                    }
-                    
-                    generate_tree(&lfs, path, &tfile, 0);
-                    lfs_file_close(&lfs, &tfile);
-                    
-                    // Open for reading to stream back
-                    err = lfs_file_open(&lfs, &stream_file, "/tree.tmp", LFS_O_RDONLY);
-                    if (err < 0) {
-                         printf("TREE: Failed to open /tree.tmp for read (%d)\n", err);
-                         resp_buf[0] = STATUS_ERR;
-                         payload_len = 0;
-                         break;
-                    }
-                    
-                    lfs_soff_t size = lfs_file_size(&lfs, &stream_file);
-                    
-                    stream_file_is_open = true;
-                    // Send header (Status + Length)
+                    // Send OK header to start stream
                     bus_write_byte(STATUS_OK);
-                    bus_write_byte(size & 0xFF);
-                    bus_write_byte((size >> 8) & 0xFF);
-                    
-                    stream_bytes_remaining = (uint16_t)size;
-                    current_state = STATE_LOADMEM_STREAM;
-                    savemem_buf_pos = 0;
-                    savemem_buf_fill = 0;
+                    bus_write_byte(0); bus_write_byte(0);
+
+                    // Recursively stream the tree
+                    stream_tree_recursive(&lfs, path, 0);
+
+                    // Finalize stream
+                    stream_end();
                     
                     bus_reset_handshake();
                     continue; // Skip standard response
@@ -1450,6 +1626,14 @@ int main() {
 
                     int port = atoi(port_str);
 
+                    // Open file immediately for streaming
+                    lfs_file_t file;
+                    int file_err = lfs_file_open(&lfs, &file, local_path, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+                    if (file_err != 0) {
+                        resp_buf[0] = STATUS_ERR;
+                        break;
+                    }
+
                     printf("HTTP GET %s:%d%s -> %s\n", ip_str, port, remote_path, local_path);
 
                     struct tcp_pcb *pcb = tcp_new();
@@ -1481,10 +1665,14 @@ int main() {
 
                     if (!resolved) {
                         resp_buf[0] = STATUS_ERR;
+                        lfs_file_close(&lfs, &file);
                         if (pcb) tcp_close(pcb);
                         break;
                     }
                     
+                    // Setup request with file handle
+                    req.file = &file;
+                    req.file_open = true;
                     tcp_arg(pcb, &req);
                     tcp_recv(pcb, http_recv_cb);
                     tcp_err(pcb, http_err_cb);
@@ -1513,34 +1701,12 @@ int main() {
 
                     if (pcb) tcp_close(pcb);
 
+                    lfs_file_close(&lfs, &file);
+
                     if (req.error || !req.complete) {
                         resp_buf[0] = STATUS_ERR;
                     } else {
-                        // Find HTTP Body (Double CRLF)
-                        uint8_t *body = NULL;
-                        size_t body_len = 0;
-                        for (size_t i = 0; i < req.received - 3; i++) {
-                            if (http_buf[i] == '\r' && http_buf[i+1] == '\n' && 
-                                http_buf[i+2] == '\r' && http_buf[i+3] == '\n') {
-                                body = &http_buf[i+4];
-                                body_len = req.received - (i + 4);
-                                break;
-                            }
-                        }
-
-                        if (body) {
-                            lfs_file_t file;
-                            int err = lfs_file_open(&lfs, &file, local_path, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
-                            if (err == 0) {
-                                lfs_file_write(&lfs, &file, body, body_len);
-                                lfs_file_close(&lfs, &file);
-                                resp_buf[0] = STATUS_OK;
-                            } else {
-                                resp_buf[0] = STATUS_ERR;
-                            }
-                        } else {
-                            resp_buf[0] = STATUS_ERR; // Header not found
-                        }
+                        resp_buf[0] = STATUS_OK;
                     }
                     payload_len = 0;
                 }
@@ -1670,6 +1836,322 @@ int main() {
                     lfs_file_close(&lfs, &file);
                     resp_buf[0] = (req.error || !req.complete) ? STATUS_ERR : STATUS_OK;
                     payload_len = 0;
+                }
+                break;
+
+            case CMD_NET_NEWS:
+                {
+                    // This entire block is synchronous and will not return until the
+                    // stream is complete, per the design requirements.
+
+                    char host[64] = "feeds.foxnews.com"; // Default
+                    char port_str[8] = "80";
+                    char path[128] = "/foxnews/politics.xml";
+
+                    if (arg_len == 0 || (arg_len == 1 && arg_buf[0] == 0)) {
+                        // No args, try to load from /etc/news.cfg
+                        if (fs_mounted) {
+                            lfs_file_t cfg_file;
+                            if (lfs_file_open(&lfs, &cfg_file, "/etc/news.cfg", LFS_O_RDONLY) == 0) {
+                                char cfg_buf[256] = {0};
+                                lfs_file_read(&lfs, &cfg_file, cfg_buf, sizeof(cfg_buf)-1);
+                                lfs_file_close(&lfs, &cfg_file);
+
+                                char *h = strtok(cfg_buf, "\n");
+                                char *p = strtok(NULL, "\n");
+                                char *a = strtok(NULL, "\n");
+                                if (h && p && a) {
+                                    strncpy(host, h, sizeof(host)-1);
+                                    strncpy(port_str, p, sizeof(port_str)-1);
+                                    strncpy(path, a, sizeof(path)-1);
+                                }
+                            }
+                        }
+                    } else {
+                        // Args provided, parse them
+                        const char *h = (const char *)arg_buf;
+                        const char *p = h + strlen(h) + 1;
+                        const char *a = p + strlen(p) + 1;
+                        strncpy(host, h, sizeof(host)-1);
+                        strncpy(port_str, p, sizeof(port_str)-1);
+                        strncpy(path, a, sizeof(path)-1);
+                    }
+
+                    int port = atoi(port_str);
+                    printf("NEWS: Fetching from %s:%d%s\n", host, port, path);
+
+                    http_req_t conn_req = {0}; // Use standard http_req for connection part
+                    bool resolved = false;
+                    if (ipaddr_aton(host, &conn_req.ip)) {
+                        resolved = true;
+                    } else {
+                        cyw43_arch_lwip_begin();
+                        dns_gethostbyname(host, &conn_req.ip, http_dns_found_cb, &conn_req);
+                        cyw43_arch_lwip_end();
+                        
+                        int timeout = 0;
+                        while(!conn_req.dns_done && !conn_req.error && timeout++ < 5000) {
+                            cyw43_arch_poll();
+                            sleep_ms(1);
+                        }
+                        if (conn_req.dns_done && !conn_req.error) resolved = true;
+                    }
+
+                    if (!resolved) {
+                        printf("NEWS: DNS failed for %s\n", host);
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break; // Use standard response mechanism
+                    }
+
+                    struct tcp_pcb *pcb = tcp_new();
+                    if (!pcb) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break; // Use standard response mechanism
+                    }
+
+                    news_req_t news_state = {0};
+                    tcp_arg(pcb, &news_state);
+                    tcp_recv(pcb, news_recv_cb);
+                    tcp_err(pcb, http_err_cb); // Can reuse standard error callback
+
+                    cyw43_arch_lwip_begin();
+                    tcp_connect(pcb, &conn_req.ip, port, news_connected_cb);
+                    cyw43_arch_lwip_end();
+
+                    int timeout = 0;
+                    while (!news_state.complete && !news_state.error && timeout++ < 5000) {
+                        if (news_state.connected) break;
+                        cyw43_arch_poll();
+                        sleep_ms(1);
+                    }
+                    
+                    if (news_state.connected) {
+                        // Connection successful, NOW we send the OK header
+                        bus_write_byte(STATUS_OK);
+                        bus_write_byte(0); bus_write_byte(0);
+
+                        char request[256];
+                        snprintf(request, sizeof(request), "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: curl/7.64.1\r\n\r\n", path, host);
+                        
+                        cyw43_arch_lwip_begin();
+                        tcp_write(pcb, request, strlen(request), TCP_WRITE_FLAG_COPY);
+                        tcp_output(pcb);
+                        cyw43_arch_lwip_end();
+
+                        // Wait for stream to complete
+                        timeout = 0;
+                        while (!news_state.complete && !news_state.error && timeout++ < 20000) { // 20s timeout
+                            cyw43_arch_poll();
+                            sleep_ms(1);
+                        }
+                    } else {
+                        printf("NEWS: Connection failed.\n");
+                    }
+
+                    // Finalize stream and clean up
+                    stream_end();
+                    if (pcb) {
+                        tcp_close(pcb);
+                    }
+                    printf("NEWS: Stream complete.\n");
+                    bus_reset_handshake();
+                    continue; // Skip standard response logic
+                }
+                break;
+
+            case CMD_NET_WEATHER:
+                {
+                    // Default location
+                    char location[64] = "Sophia,NC"; 
+                    
+                    // Check for arguments or config
+                    if (arg_len == 0 || (arg_len == 1 && arg_buf[0] == 0)) {
+                        // No args, try to load from /etc/weather.cfg
+                        if (fs_mounted) {
+                            lfs_file_t cfg_file;
+                            if (lfs_file_open(&lfs, &cfg_file, "/etc/weather.cfg", LFS_O_RDONLY) == 0) {
+                                char cfg_buf[64] = {0};
+                                lfs_file_read(&lfs, &cfg_file, cfg_buf, sizeof(cfg_buf)-1);
+                                lfs_file_close(&lfs, &cfg_file);
+                                // Trim newline
+                                char *nl = strchr(cfg_buf, '\n');
+                                if (nl) *nl = 0;
+                                if (strlen(cfg_buf) > 0) {
+                                    strncpy(location, cfg_buf, sizeof(location)-1);
+                                }
+                            }
+                        }
+                    } else {
+                        // Args provided: Use as location
+                        strncpy(location, (char*)arg_buf, sizeof(location)-1);
+                    }
+
+                    char host[] = "wttr.in";
+                    int port = 80;
+                    
+                    printf("WEATHER: Fetching for %s\n", location);
+
+                    http_req_t conn_req = {0};
+                    bool resolved = false;
+                    if (ipaddr_aton(host, &conn_req.ip)) {
+                        resolved = true;
+                    } else {
+                        cyw43_arch_lwip_begin();
+                        dns_gethostbyname(host, &conn_req.ip, http_dns_found_cb, &conn_req);
+                        cyw43_arch_lwip_end();
+                        
+                        int timeout = 0;
+                        while(!conn_req.dns_done && !conn_req.error && timeout++ < 5000) {
+                            cyw43_arch_poll();
+                            sleep_ms(1);
+                        }
+                        if (conn_req.dns_done && !conn_req.error) resolved = true;
+                    }
+
+                    if (!resolved) {
+                        printf("WEATHER: DNS failed for %s\n", host);
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
+                    struct tcp_pcb *pcb = tcp_new();
+                    if (!pcb) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
+                    news_req_t weather_state = {0}; // Reuse struct
+                    tcp_arg(pcb, &weather_state);
+                    tcp_recv(pcb, weather_recv_cb);
+                    tcp_err(pcb, http_err_cb);
+
+                    cyw43_arch_lwip_begin();
+                    tcp_connect(pcb, &conn_req.ip, port, news_connected_cb); // Reuse connected cb
+                    cyw43_arch_lwip_end();
+
+                    int timeout = 0;
+                    while (!weather_state.complete && !weather_state.error && timeout++ < 5000) {
+                        if (weather_state.connected) break;
+                        cyw43_arch_poll();
+                        sleep_ms(1);
+                    }
+                    
+                    if (weather_state.connected) {
+                        bus_write_byte(STATUS_OK);
+                        bus_write_byte(0); bus_write_byte(0);
+
+                        char request[256];
+                        // ?0 = No ASCII art, ?T = No terminal sequences, ?n = Narrow
+                        snprintf(request, sizeof(request), "GET /%s?0Tn HTTP/1.0\r\nHost: %s\r\nUser-Agent: curl/7.64.1\r\n\r\n", location, host);
+                        
+                        cyw43_arch_lwip_begin();
+                        tcp_write(pcb, request, strlen(request), TCP_WRITE_FLAG_COPY);
+                        tcp_output(pcb);
+                        cyw43_arch_lwip_end();
+
+                        timeout = 0;
+                        while (!weather_state.complete && !weather_state.error && timeout++ < 20000) {
+                            cyw43_arch_poll();
+                            sleep_ms(1);
+                        }
+                    } else {
+                        printf("WEATHER: Connection failed.\n");
+                    }
+
+                    stream_end();
+                    if (pcb) tcp_close(pcb);
+                    printf("WEATHER: Stream complete.\n");
+                    bus_reset_handshake();
+                    continue;
+                }
+                break;
+
+            case CMD_NET_RLIST:
+                {
+                    // Args: [IP]\0[Port]\0[RemotePath]
+                    const char *ip_str = (const char *)arg_buf;
+                    const char *port_str = ip_str + strlen(ip_str) + 1;
+                    const char *remote_path = port_str + strlen(port_str) + 1;
+
+                    int port = atoi(port_str);
+                    printf("RLIST: Fetching %s from %s:%d\n", remote_path, ip_str, port);
+
+                    http_req_t conn_req = {0};
+                    bool resolved = false;
+                    if (ipaddr_aton(ip_str, &conn_req.ip)) {
+                        resolved = true;
+                    } else {
+                        // Try DNS if IP parse fails
+                        cyw43_arch_lwip_begin();
+                        dns_gethostbyname(ip_str, &conn_req.ip, http_dns_found_cb, &conn_req);
+                        cyw43_arch_lwip_end();
+                        
+                        int timeout = 0;
+                        while(!conn_req.dns_done && !conn_req.error && timeout++ < 5000) {
+                            cyw43_arch_poll();
+                            sleep_ms(1);
+                        }
+                        if (conn_req.dns_done && !conn_req.error) resolved = true;
+                    }
+
+                    if (!resolved) {
+                        printf("RLIST: DNS/IP failed for %s\n", ip_str);
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
+                    struct tcp_pcb *pcb = tcp_new();
+                    if (!pcb) {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+
+                    news_req_t rlist_state = {0}; // Reuse news_req_t
+                    tcp_arg(pcb, &rlist_state);
+                    tcp_recv(pcb, weather_recv_cb); // Reuse weather callback (raw streaming)
+                    tcp_err(pcb, http_err_cb);
+
+                    cyw43_arch_lwip_begin();
+                    tcp_connect(pcb, &conn_req.ip, port, news_connected_cb); // Reuse connected cb
+                    cyw43_arch_lwip_end();
+
+                    int timeout = 0;
+                    while (!rlist_state.complete && !rlist_state.error && timeout++ < 5000) {
+                        if (rlist_state.connected) break;
+                        cyw43_arch_poll();
+                        sleep_ms(1);
+                    }
+                    
+                    if (rlist_state.connected) {
+                        bus_write_byte(STATUS_OK);
+                        bus_write_byte(0); bus_write_byte(0);
+
+                        char request[256];
+                        // User-Agent: PicoDOS triggers plain text listing in file_server.py
+                        snprintf(request, sizeof(request), "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: PicoDOS\r\n\r\n", remote_path, ip_str);
+                        
+                        cyw43_arch_lwip_begin();
+                        tcp_write(pcb, request, strlen(request), TCP_WRITE_FLAG_COPY);
+                        tcp_output(pcb);
+                        cyw43_arch_lwip_end();
+
+                        timeout = 0;
+                        while (!rlist_state.complete && !rlist_state.error && timeout++ < 20000) {
+                            cyw43_arch_poll();
+                            sleep_ms(1);
+                        }
+                    }
+
+                    stream_end();
+                    if (pcb) tcp_close(pcb);
+                    bus_reset_handshake();
+                    continue;
                 }
                 break;
 
@@ -1817,29 +2299,12 @@ int main() {
                         resp_buf[0] = STATUS_ERR;
                         payload_len = 0;
                     } else {
-                        // Find HTTP Body (Double CRLF)
-                        uint8_t *body = NULL;
-                        size_t body_len = 0;
-                        for (size_t i = 0; i < req.received - 3; i++) {
-                            if (http_buf[i] == '\r' && http_buf[i+1] == '\n' && 
-                                http_buf[i+2] == '\r' && http_buf[i+3] == '\n') {
-                                body = &http_buf[i+4];
-                                body_len = req.received - (i + 4);
-                                break;
-                            }
-                        }
-
-                        if (body) {
-                            // Copy raw body to resp_buf
-                            size_t copy_len = body_len;
-                            if (copy_len > (sizeof(resp_buf) - 3)) copy_len = (sizeof(resp_buf) - 3);
-                            memcpy(payload_ptr, body, copy_len);
-                            resp_buf[0] = STATUS_OK;
-                            payload_len = copy_len;
-                        } else {
-                            resp_buf[0] = STATUS_ERR; // Header not found or empty body
-                            payload_len = 0;
-                        }
+                        // Body is already stripped and in http_buf
+                        size_t copy_len = req.received;
+                        if (copy_len > (sizeof(resp_buf) - 3)) copy_len = (sizeof(resp_buf) - 3);
+                        memcpy(payload_ptr, http_buf, copy_len);
+                        resp_buf[0] = STATUS_OK;
+                        payload_len = copy_len;
                     }
                 }
                 break;

@@ -4,46 +4,17 @@
 
 This document outlines the architecture, communication protocol, error handling, concurrency, memory management, configuration, flash memory usage, and transient command development for the W25Q64_INTERLOCK project.
 
----
+🕹️ A Spirit of Retrocomputing
+This project embraces the hands‑on creativity of the late 1970s and early 1980s—the era of the Apple II, Commodore 64, Atari 8‑bit machines, and countless homebrew experiments. The goal is to
+capture that feeling of discovery: wiring things together, learning by doing, and building tools that feel at home on a 6502‑based system.
 
-## ⚖️ Legal & Political Context
+📚 Historical Context
+The 6502 was designed in a time when computers were simple, open, and hackable. Users were encouraged to explore, modify, and understand their machines. W25Q64_INTERLOCK continues in that tradition
+by connecting a classic 6502 CPU to modern flash storage and a Raspberry Pi Pico acting as a coprocessor.
 
-### A Note on Creativity and Regulation
-
-This project represents the kind of creative, experimental tinkering that happens when curious people are free to explore interesting technical problems without asking permission.
+This project is purely educational and hobbyist in nature. It exists to celebrate the joy of low‑level programming, embedded systems, and the retrocomputing mindset.
 
 **Don's DOS ("DDOS")** connects a 1970s 6502 processor to modern flash memory—exactly the sort of educational, non-commercial work that flourishes in an environment of creative freedom.
-
-### 🗽 Political Perspective
-
-The author believes that laws mandating specific technical implementations—including age verification APIs—represent an overreach when applied outside their intended context of large commercial platforms. Such regulations can:
-
-- Chill innovation and knowledge-sharing among hobbyists
-- Create uncertainty for non-commercial creators
-- Solve problems that don't exist in experimental, offline projects like this one
-
-This project exists as a small stand for the principle that technical creativity should not require government permission.
-
-### ✅ Compliance Context
-
-To be clear about this project's actual scope:
-
-| Factor | Reality |
-|--------|---------|
-| **Commercial intent** | None. This is a hobbyist/educational project. |
-| **Distribution** | Source code on GitHub, not commercial app stores. |
-| **Users** | Retrocomputing enthusiasts, developers, learners. |
-| **Data collection** | Zero. No analytics, no tracking, no user data. |
-| **API integration** | None. No calls to any external services. |
-| **Target audience** | People interested in 6502 assembly and embedded systems. |
-
-This software is provided "as-is" for educational purposes. It is not a "covered application" under any state's age verification laws, as those laws target commercial app stores and the apps distributed through them.
-
-### 📚 Historical Context
-
-The 6502 processor this software runs on was designed in an era before legislators mandated features in operating systems. The author suggests that the explosion of creativity from that era—the Apple II, Commodore 64, Atari, and countless experiments—might not have happened under today's regulatory climate.
-
-*This statement reflects the author's views and is provided for context, not as legal advice. Last updated: March 2026.*
 
 ---
 
@@ -77,7 +48,32 @@ The 65C02 computer issues commands, which are transmitted through the 6522 VIA t
     |                       |                 |                       |
     | GND  -----------------| [COMMON GND] ---|--- GND                |
     |                       |                 |                       |
-    +-----------------------+                 +-----------------------+
+    +-----------------------+                 +-----------+-----------+
+                                              |   BRIDGE PICO (W)     |
+                                              |                       |
+                                              |  GP19 --------------->| DI (MOSI)
+                                              |  GP18 --------------->| CLK
+                                              |  GND  --------------->| GND
+                                              |  GP17 --------------->| CS
+                                              |  GP16 --------------->| DO (MISO)
+                                              |                       |
+                                              +-----------+-----------+
+                                                          |
+                                                          |
+                                                          v
+                                                +---------------------+
+                                                |     W25Q64 FLASH    |
+                                                | (left→right labels) |
+                                                |                     |
+                                                |   DI(MOSI) <------->| GP19
+                                                |   CLK      <------->| GP18
+                                                |   GND      <------->| GND
+                                                |   DO(MISO) <------->| GP16
+                                                |   CS       <------->| GP17
+                                                |   VCC      <------->| 3V3
+                                                |                     |
+                                                +---------------------+
+
 ```
 
 ---
@@ -158,7 +154,117 @@ For complete command definitions including hex values for network commands (GET,
 
 ---
 
-## 3. External Commands (Transient Programs)
+## 3. Building the Bridge Pico (Pico W) and the Host Pico (65C02 Emulator) Firmware
+
+This project involves two Raspberry Pi Picos:
+
+1. **Bridge Pico (Pico W):** The smart peripheral handling filesystem, network, and 6502 bus interface.
+2. **Host Pico (Standard Pico):** Emulates the 6502 system (if not using real hardware).
+
+The build process involves:
+
+1. CA65
+2. Pico SDK
+3. Python 3
+
+### 3.1 Bridge Pico (Pico W)
+
+**Build Steps:**
+
+1. Clone the repository and switch to the project root directory:
+
+    ```bash
+    git clone <https://github.com/DonaldMoran/W25Q64_INTERLOCK.git>
+    cd W25Q64_INTERLOCK
+    ```
+
+    **Configuration:**
+    Before building, open `src/main.c` and configure your network settings:
+
+    ```c
+    #define WIFI_SSID "YOUR_SSID"
+    #define WIFI_PASSWORD "YOUR_WIFI_PASS"
+    #define FILE_SERVER_IP "192.168.1.100" // IP of your PC running file_server.py
+    ```
+
+2. Ensure the **Pico SDK** is installed and the `PICO_SDK_PATH` environment variable is set. For example in my .bashrc:
+
+    ```bash
+    export PICO_SDK_PATH=/home/noneya/pico/pico-sdk
+    ```
+
+3. If picotool is installed, the compile.sh script will perform the following steps and load the pico w if it is in bootsel mode, else create a build directory:
+
+    ```bash
+    mkdir build
+    cd build
+    ```
+
+4. Run CMake:
+
+    ```bash
+    cmake ..
+    ```
+
+5. Compile:
+
+    ```bash
+    make
+    ```
+
+6. **Flash:** Hold the BOOTSEL button on your Pico W, connect it to USB, and copy the generated `6522_smart_device.uf2` file to the `RPI-RP2` drive.
+
+### 3.2 Host Pico (65C02 Emulator)
+
+**Source Location:** `emmulator/EMULATOR/`
+
+**Build Steps:**
+
+1. Assuming you are still in the build directory for the Bridge pico w from above, navigate to the emmulator directory:
+
+    ```bash
+    cd ..
+    cd emmulator/EATERSD10
+    ./doit.sh
+    ```
+
+    ```text
+    This will first build the ROM image at location EATERSD10/four-bit-mode-msbasic/tmp/eater.bin
+    The bin file will the be converted to a c header as eater.h and copied to ../EMULATOR/src
+    Ultimately you will land in directory EMULATOR/build - see source for doit.sh for details
+    ```
+
+2. **Flash:** Hold the BOOTSEL button on your standard Pico, connect it to USB, and copy the generated `6502emu.uf2` file to the `RPI-RP2` drive.
+
+### Optional but recommended: Building the transient commands
+
+Assuming you are currently in the build directory for the 65c02 from above:
+
+```bash
+cd ../../6502/ca65
+make clean
+make
+```
+
+### Create a package of the 2 uf2 files and all the transient commands
+
+The quickest way to gather the firmware for both pico's as well as all the optional transient commands is to:
+
+1. Swith to the projects root > tools directory and execute python pkg_builder.py
+
+    This will result in a directory structure of, for example:
+
+    ```text
+    pkg_build
+    └── version_0.9
+        ├── 6502emu.uf2
+        ├── 6522_smart_device.uf2
+        └── transient_cmds.zip
+    ```
+
+---
+
+## 4. External Commands (Transient Programs)
 
 Commands marked as **(External)** are transient programs loaded from the filesystem.
 
@@ -181,7 +287,7 @@ Source code for all transient commands is located in:
 
 ---
 
-## 4. Communication Protocol
+## 5. Communication Protocol
 
 Communication between the 65C02 and Raspberry Pi Pico W occurs over a fully interlocked parallel bus via the 6522 VIA.
 
@@ -219,7 +325,7 @@ Large transfers use Pico-side state machines:
 
 ---
 
-## 5. Error Handling
+## 6. Error Handling
 
 Errors detected by the Pico W are propagated back to the 65C02 using status codes and displayed by the shell. This centralizes error reporting and keeps the Pico-side implementation simple.
 
@@ -234,7 +340,7 @@ Errors detected by the Pico W are propagated back to the 65C02 using status code
 
 ---
 
-## 6. Concurrency and Timing
+## 7. Concurrency and Timing
 
 Parallel bus communication is fully hardware-interlocked. No software delays are required.
 
@@ -245,7 +351,7 @@ Parallel bus communication is fully hardware-interlocked. No software delays are
 
 ---
 
-## 7. Writing and Running Programs
+## 8. Writing Programs on the 6502 with Krusader
 
 Programs can be written on the 6502 using the Krusader assembler, saved to disk, and executed with `RUN`.
 
@@ -257,42 +363,42 @@ The first 2 bytes must be the **Load Address** (little-endian). Program code fol
 
 1. **Enter Krusader**
 
-```sh
-F000R
-```
+    ```sh
+    F000R
+    ```
 
-1. **Write Program**
+2. **Write Program**
 
-```asm
-000 LOAD .M $38FE
-001 .W $3900
-002 START .M $3900
-003 LDA #'A'
-004 LOOP JSR $FFEF
-005 CLC
-006 ADC #$1
-007 CMP #'Z'+1
-008 BNE LOOP
-009 RTS
-```
+    ```asm
+    000 LOAD .M $38FE
+    001 .W $3900
+    002 START .M $3900
+    003 LDA #'A'
+    004 LOOP JSR $FFEF
+    005 CLC
+    006 ADC #$1
+    007 CMP #'Z'+1
+    008 BNE LOOP
+    009 RTS
+    ```
 
-1. **Assemble**
+3. **Assemble**
 
-```sh
-ASM
-```
+    ```sh
+    A
+    ```
 
-1. **Save**
+4. **Save**
 
-```sh
-SAVEMEM 38FE 390C ABC.BIN
-```
+    ```sh
+    SAVEMEM 38FE 390C ABC.BIN
+    ```
 
-1. **Run**
+5. **Run**
 
-```sh
-RUN ABC.BIN
-```
+    ```sh
+    RUN ABC.BIN
+    ```
 
 Output: `ABCDEFGHIJKLMNOPQRSTUVWXYZ`
 
@@ -306,7 +412,7 @@ The Krusader assembler has been patched with new file I/O commands:
 
 ---
 
-## 8. Memory Management
+## 9. Memory Management
 
 - `http_buf` – 32KB static buffer for HTTP downloads  
 - `savemem_buf` – 256-byte streaming buffer for flash operations  
@@ -314,7 +420,7 @@ The Krusader assembler has been patched with new file I/O commands:
 
 ---
 
-## 9. Configuration
+## 10. Configuration
 
 Wi-Fi credentials are configured in:
 
@@ -327,19 +433,19 @@ Defines:
 
 ---
 
-## 10. W25Q64 Flash Usage
+## 11. W25Q64 Flash Usage
 
 The full 8MB capacity of the W25Q64 flash chip is used for the LittleFS filesystem.
 
 ---
 
-## 11. Transient Command Development (CURRENT PRIORITY)
+## 12. Transient Command Development (CURRENT PRIORITY)
 
 > **Note:** The following section documents the definitive pattern for creating transient commands, validated by the working `PING` command.
 
 ---
 
-### 11.1 Project Structure
+### 12.1 Project Structure
 
 ```text
 6502/ca65/
@@ -368,7 +474,7 @@ The full 8MB capacity of the W25Q64 flash chip is used for the LittleFS filesyst
 
 ---
 
-### 11.2 Memory Layout (from `transient.cfg`)
+### 12.2 Memory Layout (from `transient.cfg`)
 
 $07FE-$07FF: HEADER segment (2 bytes: load address $0800, little-endian)
 $0800-... : CODE segment (program code starts here)
@@ -382,7 +488,7 @@ This layout ensures:
 
 ---
 
-### 11.3 Zero Page Usage — CRITICAL
+### 12.3 Zero Page Usage — CRITICAL
 
 The shell reserves `$50-$57`. Transient commands **MUST** use `$58-$5F` only.
 
@@ -405,7 +511,7 @@ Do NOT use shell's arg_ptr, str_ptr1, str_ptr2, or ptr_temp
 Do NOT call shell's argument parsing functions
 Implement your own simple parsing
 
-### 11.4 Shared Buffers and Functions
+### 12.4 Shared Buffers and Functions
 
 ```assembly
 ; Zero Page Assignments
@@ -429,7 +535,7 @@ LAST_STATUS = $??    ; Status from last Pico command
 
 ```
 
-### 11.5 The Definitive Transient Command Pattern
+### 12.5 The Definitive Transient Command Pattern
 
 Based on the working PING command, all transient commands should follow this exact structure:
 
@@ -452,6 +558,7 @@ CRLF  = $FED1    ; Print CR/LF
 ; ---------------------------------------------------------------------------
 ; Zero page (USE ONLY $58-$5F)
 ; ---------------------------------------------------------------------------
+t_arg_ptr    = $58
 t_str_ptr1   = $5A
 t_str_ptr2   = $5C
 t_ptr_temp   = $5E
@@ -476,6 +583,17 @@ start:
     tya
     pha
     
+    ; --- CRITICAL: Sanitize CPU state ---
+    ; MSBASIC is known to exit with Decimal Mode set and interrupts enabled.
+    ; Always clear decimal mode and disable interrupts to ensure robust operation.
+    cld
+    sei
+
+    ; --- (Optional) Parse command-line arguments ---
+    ; This helper will set t_arg_ptr to point to the first argument
+    ; in the command line, ready for your own parsing logic.
+    ; jsr skip_cmd_args
+
     ; ========== Debug: Show we're running ==========
     lda #<debug_prefix
     sta t_str_ptr1
@@ -499,6 +617,46 @@ done:
     pla
     plp
     clc              ; Return with carry clear
+    rts
+
+; ---------------------------------------------------------------------------
+; Helper: Skip past "RUN" and "/BIN/CMD.BIN" to find arguments
+; Out: t_arg_ptr points to the start of the first argument, or a null
+;      terminator if no arguments are present.
+; ---------------------------------------------------------------------------
+skip_cmd_args:
+    lda #<INPUT_BUFFER
+    sta t_arg_ptr
+    lda #>INPUT_BUFFER
+    sta t_arg_ptr+1
+    jsr skip_word ; Skips "RUN"
+    jsr skip_word ; Skips "/BIN/COMMAND.BIN"
+    rts
+
+skip_word:
+    ldy #0
+@skip_chars:
+    lda (t_arg_ptr), y
+    beq @sw_done
+    cmp #' '
+    beq @found_space
+    iny
+    jmp @skip_chars
+@found_space:
+@skip_spaces:
+    iny
+    lda (t_arg_ptr), y
+    beq @sw_done
+    cmp #' '
+    beq @skip_spaces
+@sw_done:
+    tya
+    clc
+    adc t_arg_ptr
+    sta t_arg_ptr
+    lda #0
+    adc t_arg_ptr+1
+    sta t_arg_ptr+1
     rts
 
 ; ---------------------------------------------------------------------------
@@ -554,117 +712,45 @@ msg_success:     .asciiz "SUCCESS"
 msg_fail:        .asciiz "FAIL"
 ```
 
-### 11.6 Working Example: PING Command
+### 12.6 Blueprint for Creating Transient Streaming Commands
 
-The PING command validates this pattern:
+**Architectural Rules for New Streaming Commands:**
 
-```assembly
-; ping.s - Working example
-.segment "HEADER"
-    .word $0800
+#### 1. Streaming Protocol
 
-.segment "CODE"
-start:
-    ; Save registers
-    php
-    pha
-    txa
-    pha
-    tya
-    pha
-    
-    ; Show we're running
-    lda #<debug_prefix
-    sta t_str_ptr1
-    lda #>debug_prefix
-    sta t_str_ptr1+1
-    jsr print_string
-    
-    ; Send PING command
-    lda #$01           ; CMD_SYS_PING
-    sta CMD_ID
-    lda #$00
-    sta ARG_LEN
-    
-    ; Show command
-    lda #<debug_cmd
-    sta t_str_ptr1
-    lda #>debug_cmd
-    sta t_str_ptr1+1
-    jsr print_string
-    
-    lda CMD_ID
-    jsr print_hex
-    
-    jsr pico_send_request
-    
-    ; Show status
-    lda #<debug_status
-    sta t_str_ptr1
-    lda #>debug_status
-    sta t_str_ptr1+1
-    jsr print_string
-    
-    lda LAST_STATUS
-    jsr print_hex
-    jsr CRLF
-    
-    ; Check result
-    lda LAST_STATUS
-    bne fail
-    
-    ; Success
-    lda #<msg_pong
-    sta t_str_ptr1
-    lda #>msg_pong
-    sta t_str_ptr1+1
-    jsr print_string
-    jsr CRLF
-    jmp done
-    
-fail:
-    ; Failure
-    lda #<msg_fail
-    sta t_str_ptr1
-    lda #>msg_fail
-    sta t_str_ptr1+1
-    jsr print_string
-    jsr CRLF
-    
-done:
-    ; Restore registers
-    pla
-    tay
-    pla
-    tax
-    pla
-    plp
-    clc
-    rts
+- **Use Framed Output:** `[LEN_LO] [LEN_HI] [DATA...]` (Little-Endian).
+- **EOF Marker:** A frame with length 0 (`0x00 0x00`) signals the end of the stream.
+- **No SYNC Byte:** The bus is hardware-interlocked; do not add synchronization bytes.
 
-; ... helper functions ...
+#### 2. Pico-Side Handler (`main.c`)
 
-.segment "RODATA"
-debug_prefix:    .asciiz "PING: "
-debug_cmd:       .asciiz "Cmd="
-debug_status:    .asciiz " Status="
-msg_pong:        .asciiz "PONG"
-msg_fail:        .asciiz "FAIL"
-```
+- **Strict Synchronization:** The handler **MUST NOT** return to the main loop until the entire stream is finished and the EOF frame is sent.
+- **Status Header:**
+  - If the command fails *before* streaming starts (e.g., DNS fail), send `STATUS_ERR` and exit.
+  - If the command succeeds, send `STATUS_OK` followed by `0x00 0x00` (dummy length) before sending the first data frame.
+- **Helpers:** Use `stream_send_chunk(data, len)` and `stream_end()` helpers.
 
-Sample Output:
+#### 3. 6502-Side Command (`.s`)
 
-```text
-> PING
-PING: Cmd=01 Status=00
-PONG
-```
+- **Memory:** Load at `$0800`. Use Zero Page `$58-$5F` only.
+- **Read Loop:**
+    1. Read Status. If `STATUS_ERR`, consume 2 bytes (dummy len) and exit.
+    2. Read `LEN_LO`, `LEN_HI`.
+    3. If `LEN == 0`, exit loop.
+    4. Read `LEN` bytes and process/print them.
+    5. Repeat.
+- **Pagination:** If implementing `--More--` functionality, poll the ACIA (keyboard) for input. Do not read from the bus during the pause (this maintains hardware flow control).
 
-## 12. Network File Access Extension
+#### 4. Configuration
+
+- **Defaults:** Store default settings in a small text file in `/etc/` (e.g., `/etc/ping.cfg`).
+- **Set Default:** Implement `SETDEFAULT` logic on the 6502 side by writing to that file using standard filesystem commands. Do not handle `SETDEFAULT` inside the Pico firmware command.
+
+## 13. Network File Access Extension
 
 The following network commands have been implemented and validated:
 
-### 12.1 SETSERVER (External)
+### 13.1 SETSERVER (External)
 
 ```sh
 SETSERVER <ip:port>
@@ -674,7 +760,7 @@ Writes server address to server.cfg
 
 No argument → display current server
 
-### 12.2 GET (External)
+### 13.2 GET (External)
 
 ```sh
 GET <remote-path> [local-path]
@@ -686,7 +772,7 @@ Builds:
 ip\0port\0remote\0local
 Sends CMD_NET_HTTP_GET
 
-### 12.3 PUT (External)
+### 13.3 PUT (External)
 
 ```sh
 PUT <local-path> <remote-path>
@@ -702,7 +788,7 @@ Sends CMD_NET_HTTP_POST
 
 > **Note:** Transient commands (`GET`, `PUT`) now fully support **relative paths** and respect the shell's Current Working Directory (CWD).
 
-## 13. File Server (tools/file_server.py)
+## 14. File Server (tools/file_server.py)
 
 Runs on remote machine (default port 8000). Supports:
 
@@ -711,7 +797,7 @@ Runs on remote machine (default port 8000). Supports:
 - X-Mkdir header for directory creation
 - X-Append header for append mode
 
-## 14. Building Transient Commands
+## 15. Building Transient Commands
 
 ```bash
 cd 6502/ca65/commands
@@ -730,7 +816,7 @@ bin/command.mon (WozMon format for pasting)
 - Generates .mon files for WozMon
 - Uses --cpu W65C02 for proper 65C02 support
 
-## 15. Testing Workflow
+## 16. Testing Workflow
 
 Start file server:
 
@@ -764,14 +850,14 @@ Uploading...
 Done
 ```
 
-## 16. Future Ideas (Post-Network Access)
+## 17. Future Ideas (Post-Network Access)
 
 ```text
 
 Exit via Ctrl+Z or Ctrl+X
 ```
 
-## 17. Important Rules Summary
+## 18. Important Rules Summary
 
 - **Zero Page:** NEVER use $50-$57 in transient commands
 - **Header:** Every transient command must start with .word $0800
@@ -916,7 +1002,7 @@ $50-$5F is DEFINITELY AVAILABLE - in fact, it's part of a large free block from 
 
 This is excellent news for your project - you have plenty of zero page space to work with!
 
-## 18. Development Workflow (RAM Testing)
+## 19. Development Workflow (RAM Testing)
 
 To test changes to the shell without burning a new ROM:
 
@@ -942,7 +1028,7 @@ To test changes to the shell without burning a new ROM:
 
     You are now running the new shell from RAM.
 
-## 19. Build System & File Reference
+## 20. Build System & File Reference
 
 ### Build Configuration Files
 
@@ -966,83 +1052,6 @@ To test changes to the shell without burning a new ROM:
 | File | Status |
 | ---- | ------ |
 | `6502/ca65/commands/transient.inc` | **Deprecated**. Replaced by `pico_def.inc` and `pico_lib.s`. Do not use for new commands. |
-
-## 20. Building the Pico Firmware
-
-This project involves two Raspberry Pi Picos:
-
-1. **Bridge Pico (Pico W):** The smart peripheral handling filesystem, network, and 6502 bus interface.
-2. **Host Pico (Standard Pico):** Emulates the 6502 system (if not using real hardware).
-
-### 20.1 Bridge Pico (Pico W)
-
-**Source Location:** `src/` (Root of repository)
-
-**Configuration:**
-Before building, open `src/main.c` and configure your network settings:
-
-```c
-#define WIFI_SSID "YOUR_SSID"
-#define WIFI_PASSWORD "YOUR_WIFI_PASS"
-#define FILE_SERVER_IP "192.168.1.100" // IP of your PC running file_server.py
-```
-
-**Build Steps:**
-
-1. Ensure the **Pico SDK** is installed and the `PICO_SDK_PATH` environment variable is set.
-2. Create a build directory:
-
-    ```bash
-    mkdir build
-    cd build
-    ```
-
-3. Run CMake:
-
-    ```bash
-    cmake ..
-    ```
-
-4. Compile:
-
-    ```bash
-    make
-    ```
-
-5. **Flash:** Hold the BOOTSEL button on your Pico W, connect it to USB, and copy the generated `W25Q64_INTERLOCK.uf2` file to the `RPI-RP2` drive.
-
-### 20.2 Host Pico (6502 Emulator)
-
-**Source Location:** `emmulator/EMULATOR/`
-
-**Build Steps:**
-
-1. Navigate to the emulator directory:
-
-    ```bash
-    cd emmulator/EMULATOR
-    ```
-
-2. Create a build directory:
-
-    ```bash
-    mkdir build
-    cd build
-    ```
-
-3. Run CMake:
-
-    ```bash
-    cmake ..
-    ```
-
-4. Compile:
-
-    ```bash
-    make
-    ```
-
-5. **Flash:** Hold the BOOTSEL button on your standard Pico, connect it to USB, and copy the generated `.uf2` file to the `RPI-RP2` drive.
 
 ## 21. Last commit branch feature/transient-9
 
@@ -1142,3 +1151,46 @@ Before building, open `src/main.c` and configure your network settings:
     - **Firmware Support:** Added `CMD_FS_SPACE` to the Pico firmware, which uses `lfs_fs_size()` to return total blocks, used blocks, and block size.
     - **6502 Client:** Created the `DF` transient command to provide a human-readable disk usage report.
     - **Safe Arithmetic:** The `DF` command performs 32-bit calculations on the 6502 to display usage in Blocks, KB, and MB, with robust logic to prevent overflow.
+
+### 🚩 Milestone: Local Commit `ed1ca76`
+
+**Status:** Stable checkpoint within `feature/transient-10`. Development continues from this point.
+
+**Accomplishments:**
+
+1. **New Transient Command: NEWS**
+    - **Streaming XML Parser:** Implemented a streaming XML parser on the Pico that extracts `<title>` tags from RSS feeds on the fly, minimizing memory usage.
+    - **Framed Protocol:** Uses a robust `[LEN_LO][LEN_HI][DATA]` streaming protocol to send headlines to the 6502, supporting infinite stream lengths.
+    - **Configuration:** Supports a default feed (stored in `/etc/news.cfg`), one-time URL overrides via arguments, and a `SETDEFAULT` subcommand to update the config.
+        - *Usage:* `NEWS SETDEFAULT <host> <port> <path>`
+        - *Example:* `NEWS SETDEFAULT feeds.bbci.co.uk 80 /news/world/rss.xml`
+    - **Compatibility:** Implemented User-Agent spoofing to bypass HTTP-to-HTTPS redirects on strict servers (e.g., Fox News), ensuring compatibility with the Pico's HTTP-only stack.
+    - **Robustness:** Hardened the streaming protocol to handle connection failures gracefully, ensuring the 6502 bus never desynchronizes even if the network operation fails mid-stream.
+
+2. **New Transient Command: WEATHER**
+    - **Streaming Output:** Connects to `wttr.in` and streams the ASCII art weather report directly to the 6502 console using the framed protocol.
+    - **Header Stripping:** Implemented a state machine on the Pico to strip raw HTTP headers from the TCP stream, ensuring only the clean weather report is displayed.
+    - **Configuration:** Supports a default location (stored in `/etc/weather.cfg`) and one-time overrides.
+        - *Usage:* `WEATHER SETDEFAULT <location>`
+        - *Example:* `WEATHER SETDEFAULT Sophia,NC`
+
+3. **Redesigned TREE Command (Streaming)**
+    - **Direct Streaming:** Replaced the old file-based implementation with a recursive streaming engine on the Pico. The `TREE` command now generates and sends directory listings on-the-fly using the framed protocol.
+    - **Zero Flash Wear:** Eliminated the creation of the temporary `/tree.tmp` file, significantly reducing flash wear and latency.
+    - **Memory Efficient:** The new design uses constant RAM (stack recursion depth limited) and supports directory structures of any size without buffering limits.
+    - **Synchronization:** Updated the 6502 client to use the new framed read loop, ensuring perfect synchronization with the Pico's output stream.
+
+4. **Redesigned RLIST Command (Streaming)**
+    - **Direct Streaming:** The `RLIST` command, which lists files on a remote server, has been re-engineered to use the same direct streaming protocol as `TREE` and `NEWS`. It now streams the directory listing from the remote HTTP server directly to the 6502 on-the-fly.
+    - **Zero Flash Wear & Latency:** This change eliminates the need for any temporary files on the Pico's flash, reducing wear and improving responsiveness.
+    - **Memory Efficient:** The new design uses constant RAM on the Pico, streaming the HTTP response body in chunks without buffering the entire listing.
+    - **Robustness:** The 6502 client uses the standard framed read loop, ensuring it stays synchronized with the Pico's output stream even if the network connection is slow or intermittent.
+
+5. **Pico Firmware Buffer Optimization & Streaming Refactor**
+    - **Unified Buffer Architecture:** Removed dedicated `savemem_buf` (256B) and `http_buf` (32KB). Increased the general-purpose `resp_buf` to 4KB. This saves ~28KB of RAM while aligning buffer sizes with the filesystem block size.
+    - **Unlimited HTTP GET:** Refactored `CMD_NET_HTTP_GET` to stream data directly to the filesystem with on-the-fly header stripping. This removes the previous 32KB file size limit, allowing downloads of any size supported by the disk.
+    - **Optimized Memory Operations:** Updated `SAVEMEM` and `LOADMEM` to use the 4KB `resp_buf`, reducing filesystem overhead by writing/reading in 4KB chunks instead of 256-byte chunks.
+    - **Enhanced Directory Listings:** The larger `resp_buf` allows the built-in `DIR` command to list significantly more files before truncation.
+
+6. **Transient Command Standardization**
+    - **Updated Blueprint:** Revised the "Definitive Transient Command Pattern" in the documentation to include critical CPU sanitization (`CLD`, `SEI`) and a reusable argument parsing routine. This establishes a robust standard for all future command development.
