@@ -1,0 +1,17 @@
+NAME
+  RM-FR - Recursive Remove (External)
+
+SYNOPSIS
+  RM-FR [path]
+
+DESCRIPTION
+  Recursively deletes a directory and
+  all its contents.
+  
+  WARNING: Irreversible.
+
+EXAMPLES
+  RM-FR /OLD_DIR
+
+SEE ALSO
+  RM, RM*

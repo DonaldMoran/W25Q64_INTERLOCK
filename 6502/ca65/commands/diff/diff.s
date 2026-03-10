@@ -49,6 +49,10 @@ start:
     tya
     pha
 
+    ; Sanitize CPU state
+    cld
+    sei
+
     ; Initialize offset
     lda #0
     sta offset

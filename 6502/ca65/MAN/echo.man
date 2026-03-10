@@ -1,0 +1,15 @@
+NAME
+  ECHO - Print Text (External)
+
+SYNOPSIS
+  ECHO [text]
+
+DESCRIPTION
+  Prints the provided text to the
+  screen. Useful in batch scripts.
+
+EXAMPLES
+  ECHO Hello World
+
+SEE ALSO
+  DO

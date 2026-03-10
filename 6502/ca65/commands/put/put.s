@@ -15,9 +15,10 @@ OUTHEX = $FFDC   ; Print hex byte in A
 CRLF  = $FED1    ; Print CR/LF
 
 ; ---------------------------------------------------------------------------
-; Zero page - Using shell's ptr_temp ($56-$57) which is saved/restored
+; Zero page - Corrected to use transient-safe area $58-$5F
 ; ---------------------------------------------------------------------------
-ptr_temp = $56   ; 2 bytes - Shell's temporary pointer (safe to use)
+t_str_ptr1 = $5A ; 2 bytes - For printing strings
+t_ptr_temp = $5E ; 2 bytes - Temporary pointer (safe after CWD is saved)
 
 ; ---------------------------------------------------------------------------
 ; Constants
@@ -53,6 +54,10 @@ start:
     pha
     tya
     pha
+
+    ; Sanitize CPU state
+    cld
+    sei
 
     ; Save CWD pointer from shell ($5E/$5F)
     lda $5E
@@ -171,9 +176,9 @@ start:
     beq @file_exists
     
     lda #<msg_no_file
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_no_file
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
     jmp done
@@ -222,9 +227,9 @@ start:
     beq @open_ok
     
     lda #<msg_no_cfg
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_no_cfg
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
     jmp done
@@ -253,9 +258,9 @@ start:
     beq @read_ok
     
     lda #<msg_bad_cfg
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_bad_cfg
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
     jmp close_file
@@ -360,6 +365,12 @@ close_file:
     iny
     jmp @copy_remote
 @remote_done:
+    ; Check if remote path ends in '/'
+    dex
+    lda ARG_BUFF, x
+    inx
+    cmp #'/'
+    beq @append_basename_only
     lda #0
     sta ARG_BUFF, x
     inx
@@ -370,10 +381,11 @@ close_file:
     lda #'/'
     sta ARG_BUFF, x
     inx
+@append_basename_only:
 
     ; Find start of basename in INPUT_BUFFER
     ldy local_start
-    sty ptr_temp ; Store start index
+    sty t_ptr_temp ; Store start index
     
 @find_basename:
     lda INPUT_BUFFER, y
@@ -382,14 +394,14 @@ close_file:
     beq @basename_found
     cmp #'/'
     bne @next_char
-    sty ptr_temp ; Found a slash, update start index
-    inc ptr_temp ; Point to char after slash
+    sty t_ptr_temp ; Found a slash, update start index
+    inc t_ptr_temp ; Point to char after slash
 @next_char:
     iny
     jmp @find_basename
 
 @basename_found:
-    ldy ptr_temp
+    ldy t_ptr_temp
 @copy_basename:
     lda INPUT_BUFFER, y
     beq @remote_local_done
@@ -411,9 +423,9 @@ close_file:
     ; 5. Send HTTP POST command
     ; -----------------------------------------------------------------------
     lda #<msg_uploading
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_uploading
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
 
@@ -425,27 +437,27 @@ close_file:
     bne @upload_failed
     
     lda #<msg_done
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_done
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
     jmp done
 
 @upload_failed:
     lda #<msg_err
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_err
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
     jmp done
 
 usage:
     lda #<msg_usage
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_usage
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
     jmp done
@@ -462,9 +474,9 @@ done:
 
 close_and_fail:
     lda #<msg_bad_cfg
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_bad_cfg
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
     jmp close_file
@@ -483,13 +495,13 @@ resolve_local_path:
 
     ; Relative path - prepend CWD
     lda cwd_ptr
-    sta ptr_temp
+    sta t_ptr_temp
     lda cwd_ptr+1
-    sta ptr_temp+1
+    sta t_ptr_temp+1
     
     ldy #0
 @copy_cwd:
-    lda (ptr_temp), y
+    lda (t_ptr_temp), y
     beq @cwd_done
     sta ARG_BUFF, x
     inx
@@ -498,11 +510,11 @@ resolve_local_path:
 @cwd_done:
     ; Add slash if needed (unless CWD is just "/")
     ldy #0
-    lda (ptr_temp), y
+    lda (t_ptr_temp), y
     cmp #'/'
     bne @add_slash
     ldy #1
-    lda (ptr_temp), y
+    lda (t_ptr_temp), y
     beq @start_local ; CWD is "/", don't add another slash
 @add_slash:
     lda #'/'
@@ -524,14 +536,14 @@ resolve_local_path:
     rts
 
 ; ---------------------------------------------------------------------------
-; Print string using ptr_temp ($56-$57)
+; Print string using t_str_ptr1 ($5A-$5B)
 ; ---------------------------------------------------------------------------
 print_string:
     pha
     phy
     ldy #0
 @loop:
-    lda (ptr_temp), y
+    lda (t_str_ptr1), y
     beq @done
     jsr OUTCH
     iny

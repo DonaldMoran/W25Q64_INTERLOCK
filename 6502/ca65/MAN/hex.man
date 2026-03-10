@@ -1,0 +1,14 @@
+NAME
+  HEX - Hex Dump (External)
+
+SYNOPSIS
+  HEX [file]
+
+DESCRIPTION
+  Displays a hex dump of a file.
+
+EXAMPLES
+  HEX BINARY.DAT
+
+SEE ALSO
+  TYPE, CAT

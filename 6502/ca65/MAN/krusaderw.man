@@ -1,0 +1,15 @@
+NAME
+  KRUSADERW - Krusader Warm (External)
+
+SYNOPSIS
+  KRUSADERW
+
+DESCRIPTION
+  Warm starts Krusader, preserving
+  source code buffer if possible.
+
+EXAMPLES
+  KRUSADERW
+
+SEE ALSO
+  KRUSADER

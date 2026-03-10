@@ -1,0 +1,16 @@
+NAME
+  TOUCH - Create Empty File (Internal)
+
+SYNOPSIS
+  TOUCH [file]
+
+DESCRIPTION
+  Creates an empty file if it does not
+  exist, or updates the timestamp if
+  supported.
+
+EXAMPLES
+  TOUCH NEWFILE.TXT
+
+SEE ALSO
+  MKDIR, WRITE

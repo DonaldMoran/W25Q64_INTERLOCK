@@ -15,9 +15,10 @@ OUTHEX = $FFDC   ; Print hex byte in A
 CRLF  = $FED1    ; Print CR/LF
 
 ; ---------------------------------------------------------------------------
-; Zero page - Using shell's ptr_temp ($56-$57) which is saved/restored
+; Zero page - Corrected to use transient-safe area $58-$5F
 ; ---------------------------------------------------------------------------
-ptr_temp = $56   ; 2 bytes - Shell's temporary pointer (safe to use)
+t_str_ptr1 = $5A ; 2 bytes - For printing strings
+t_ptr_temp = $5E ; 2 bytes - Temporary pointer (safe after CWD is saved)
 
 ; ---------------------------------------------------------------------------
 ; Constants
@@ -52,6 +53,10 @@ start:
     pha
     tya
     pha
+
+    ; Sanitize CPU state
+    cld
+    sei
 
     ; Save CWD pointer from shell ($5E/$5F)
     lda $5E
@@ -192,9 +197,9 @@ start:
     beq @open_ok
     
     lda #<msg_no_cfg
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_no_cfg
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
     jmp done
@@ -223,9 +228,9 @@ start:
     beq @read_ok
     
     lda #<msg_bad_cfg
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_bad_cfg
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
     jmp close_file
@@ -328,9 +333,43 @@ close_file:
     lda local_len
     beq @use_remote_name
     
-    ; Use provided local path
+    ; Check if provided local path is absolute
     ldy local_start
-@copy_local:
+    lda INPUT_BUFFER, y
+    cmp #'/'
+    beq @copy_local_abs
+
+    ; Relative path - prepend CWD
+    lda cwd_ptr
+    sta t_ptr_temp
+    lda cwd_ptr+1
+    sta t_ptr_temp+1
+    
+    phy ; Save Y (local_start)
+    ldy #0
+@copy_cwd_explicit:
+    lda (t_ptr_temp), y
+    beq @cwd_done_explicit
+    sta ARG_BUFF, x
+    inx
+    iny
+    jmp @copy_cwd_explicit
+@cwd_done_explicit:
+    ; Add slash if needed
+    lda (t_ptr_temp)
+    cmp #'/'
+    bne @add_slash_explicit
+    ldy #1
+    lda (t_ptr_temp), y
+    beq @no_slash_explicit
+@add_slash_explicit:
+    lda #'/'
+    sta ARG_BUFF, x
+    inx
+@no_slash_explicit:
+    ply ; Restore Y (local_start)
+
+@copy_local_abs:
     lda INPUT_BUFFER, y
     beq @local_done
     cmp #' '
@@ -338,7 +377,7 @@ close_file:
     sta ARG_BUFF, x
     inx
     iny
-    jmp @copy_local
+    jmp @copy_local_abs
 @local_done:
     lda #0
     sta ARG_BUFF, x
@@ -348,13 +387,13 @@ close_file:
 @use_remote_name:
     ; Use filename from remote path
     ; Prepend CWD
-    lda cwd_ptr
-    sta ptr_temp
+    lda cwd_ptr+0
+    sta t_ptr_temp+0
     lda cwd_ptr+1
-    sta ptr_temp+1
+    sta t_ptr_temp+1
     ldy #0
 @copy_cwd:
-    lda (ptr_temp), y
+    lda (t_ptr_temp), y
     beq @cwd_done
     sta ARG_BUFF, x
     inx
@@ -362,11 +401,11 @@ close_file:
     jmp @copy_cwd
 @cwd_done:
     ; Add slash if needed
-    lda (ptr_temp)
+    lda (t_ptr_temp)
     cmp #'/'
     bne @add_slash
     ldy #1
-    lda (ptr_temp), y
+    lda (t_ptr_temp), y
     beq @no_slash_needed
 @add_slash:
     lda #'/'
@@ -374,8 +413,26 @@ close_file:
     inx
 @no_slash_needed:
     
-    ; Copy remote filename as local filename
+    ; Find basename of remote path
     ldy remote_start
+    sty t_ptr_temp      ; Store start index
+    
+@scan_slash:
+    lda INPUT_BUFFER, y
+    beq @scan_done
+    cmp #' '
+    beq @scan_done
+    cmp #'/'
+    bne @next_char
+    sty t_ptr_temp      ; Found slash, update start index
+    inc t_ptr_temp      ; Point to char after slash
+@next_char:
+    iny
+    jmp @scan_slash
+@scan_done:
+
+    ; Copy remote filename (basename) as local filename
+    ldy t_ptr_temp
 @copy_remote_name:
     lda INPUT_BUFFER, y
     beq @remote_name_done
@@ -397,9 +454,9 @@ close_file:
     ; 4. Send HTTP GET command
     ; -----------------------------------------------------------------------
     lda #<msg_downloading
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_downloading
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
 
@@ -411,27 +468,27 @@ close_file:
     bne @download_failed
     
     lda #<msg_done
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_done
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
     jmp done
 
 @download_failed:
     lda #<msg_err
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_err
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
     jmp done
 
 usage:
     lda #<msg_usage
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_usage
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
     jmp done
@@ -448,22 +505,22 @@ done:
 
 close_and_fail:
     lda #<msg_bad_cfg
-    sta ptr_temp
+    sta t_str_ptr1
     lda #>msg_bad_cfg
-    sta ptr_temp+1
+    sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
     jmp close_file
 
 ; ---------------------------------------------------------------------------
-; Print string using ptr_temp ($56-$57)
+; Print string using t_str_ptr1 ($5A-$5B)
 ; ---------------------------------------------------------------------------
 print_string:
     pha
     phy
     ldy #0
 @loop:
-    lda (ptr_temp), y
+    lda (t_str_ptr1), y
     beq @done
     jsr OUTCH
     iny

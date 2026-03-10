@@ -1,13 +1,13 @@
 ; rmstar.s - Delete all files in current directory
 ; Usage: rm*
 
+.include "pico_def.inc"
 .import pico_send_request
 .import CMD_ID, ARG_LEN, LAST_STATUS, ARG_BUFF
 
 ; ---------------------------------------------------------------------------
 ; Constants
 ; ---------------------------------------------------------------------------
-CMD_FS_DELETE_CONTENTS = $26
 
 ; ---------------------------------------------------------------------------
 ; Zero Page (USE ONLY $58-$5F)
@@ -34,6 +34,10 @@ start:
     pha
     tya
     pha
+
+    ; Sanitize CPU state
+    cld
+    sei
 
     ; Print "Deleting all files in "
     lda #<msg_start

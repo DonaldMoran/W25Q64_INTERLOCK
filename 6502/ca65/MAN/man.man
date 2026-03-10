@@ -1,0 +1,21 @@
+NAME
+    MAN - Display manual pages
+
+SYNOPSIS
+    MAN <command>
+
+DESCRIPTION
+    Displays the manual page for the specified command.
+    The manual pages are stored as text files in the /MAN/
+    directory with a .man extension.
+
+    The output is paginated. Press any key to advance to the
+    next page, or 'q' to quit.
+
+EXAMPLES
+    MAN DIR
+    MAN COPY
+    MAN MAN
+
+SEE ALSO
+    HELP

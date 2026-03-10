@@ -1,0 +1,15 @@
+NAME
+  DF - Disk Free (External)
+
+SYNOPSIS
+  DF
+
+DESCRIPTION
+  Displays total, used, and free space
+  on the filesystem.
+
+EXAMPLES
+  DF
+
+SEE ALSO
+  BENCH, FORMAT

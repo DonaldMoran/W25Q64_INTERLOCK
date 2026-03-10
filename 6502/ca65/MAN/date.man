@@ -1,0 +1,17 @@
+NAME
+  DATE - System Time (External)
+
+SYNOPSIS
+  DATE [args]
+
+DESCRIPTION
+  Displays or sets the system time.
+  Can sync with NTP if network is
+  available.
+
+EXAMPLES
+  DATE
+  DATE NTP
+
+SEE ALSO
+  CONNECT

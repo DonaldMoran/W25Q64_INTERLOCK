@@ -1,0 +1,20 @@
+NAME
+  TREE - Visualize directory structure (External)
+
+SYNOPSIS
+  TREE [path]
+
+DESCRIPTION
+  Displays a recursive directory listing
+  as a depth-indented tree.
+  
+  Uses a streaming protocol to handle
+  large directory structures without
+  memory limits.
+
+EXAMPLES
+  TREE
+  TREE /USR
+
+SEE ALSO
+  DIR, CATALOG, LS

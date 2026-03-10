@@ -9,4 +9,8 @@ WOZMON = $FF00
 
 .segment "CODE"
 start:
+    ; Sanitize CPU state before jumping
+    cld
+    sei
+
     jmp WOZMON

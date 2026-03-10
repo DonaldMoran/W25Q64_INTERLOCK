@@ -1,0 +1,15 @@
+NAME
+  KRUSADER - Assembler (External)
+
+SYNOPSIS
+  KRUSADER
+
+DESCRIPTION
+  Starts the Krusader symbolic
+  assembler / disassembler / monitor.
+
+EXAMPLES
+  KRUSADER
+
+SEE ALSO
+  KRUSADERW, WOZMON

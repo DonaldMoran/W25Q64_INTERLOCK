@@ -1,0 +1,16 @@
+NAME
+  MOUNT - Mount Filesystem (Internal)
+
+SYNOPSIS
+  MOUNT
+
+DESCRIPTION
+  Mounts the LittleFS filesystem.
+  This is usually done automatically
+  at boot.
+
+EXAMPLES
+  MOUNT
+
+SEE ALSO
+  FORMAT, DF

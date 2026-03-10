@@ -1,0 +1,16 @@
+NAME
+  RUN - Execute Binary (Internal)
+
+SYNOPSIS
+  RUN [file]
+
+DESCRIPTION
+  Loads and executes a binary program.
+  The file must have a 2-byte header
+  specifying the load address.
+
+EXAMPLES
+  RUN /BIN/GAME.BIN
+
+SEE ALSO
+  LOADMEM, JUMP

@@ -10,7 +10,6 @@
 ; Explicitly declare external symbols from pico_lib.s
 ; ---------------------------------------------------------------------------
 .import pico_send_request, send_byte, read_byte
-.import pico_init  ; <-- ADD THIS LINE
 .import CMD_ID, ARG_LEN, ARG_BUFF, LAST_STATUS, RESP_LEN, RESP_BUFF
 
 ; ---------------------------------------------------------------------------
@@ -23,9 +22,9 @@ LOAD_ADDR    = $0800   ; Standard load address for transient programs
 INPUT_BUFFER = $0300    ; Location of Input Buffer from shell
 
 ; Zero page pointers for argument parsing
-arg_scan_ptr = $60 ; Pointer for scanning INPUT_BUFFER
-src_ptr      = $62 ; Pointer to source filename arg
-dst_ptr      = $64 ; Pointer to destination filename arg
+arg_scan_ptr = $58 ; Pointer for scanning INPUT_BUFFER
+src_ptr      = $5A ; Pointer to source filename arg
+dst_ptr      = $5C ; Pointer to destination filename arg
 
 ; -----------------------------------------------------------------------------
 ; Header (Load Address)
@@ -34,11 +33,16 @@ dst_ptr      = $64 ; Pointer to destination filename arg
     .word   LOAD_ADDR
 
 .segment "CODE"
-START:
-    ; A transient program is a standalone binary, so it must initialize
-    ; the VIA itself before communicating with the Pico.
-    sei                 ; Disable interrupts for safety
-    jsr pico_init
+start:
+    ; Standard Entry: Preserve registers and sanitize CPU state
+    php
+    pha
+    txa
+    pha
+    tya
+    pha
+    cld
+    sei
 
     ; -------------------------------------------------------------------------
     ; 1. Parse Arguments
@@ -114,18 +118,26 @@ START:
     sta CMD_ID
     jsr pico_send_request
     bcc @request_ok
-    ; TODO: Handle timeout error by printing a message
-    rts
+    jmp @done
 
 @request_ok:
     lda LAST_STATUS
     cmp #STATUS_OK
     beq @copy_ok
-    ; TODO: Handle command failed error by printing a message
-    rts
+    jmp @done
 
 @copy_ok:
     ; Success! Just return to the shell.
+
+@done:
+    ; Standard Exit: Restore registers and return
+    pla
+    tay
+    pla
+    tax
+    pla
+    plp
+    clc              ; Return with carry clear
     rts
 
 ; ---------------------------------------------------------------------------

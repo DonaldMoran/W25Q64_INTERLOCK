@@ -1,0 +1,20 @@
+NAME
+  CONNECT - Connect to Wi-Fi (Internal)
+
+SYNOPSIS
+  CONNECT [ssid] [password]
+
+DESCRIPTION
+  Connects to a Wi-Fi network.
+  Credentials are saved to wifi.cfg
+  for auto-connection on next boot.
+  
+  If run without arguments, it attempts
+  to connect using saved credentials.
+
+EXAMPLES
+  CONNECT MyWifi MyPassword
+  CONNECT
+
+SEE ALSO
+  SETSERVER, GET, PUT

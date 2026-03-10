@@ -1,0 +1,15 @@
+NAME
+  EXIT - Exit Shell (Internal)
+
+SYNOPSIS
+  EXIT
+
+DESCRIPTION
+  Exits the command shell and drops
+  to the WozMon monitor.
+
+EXAMPLES
+  EXIT
+
+SEE ALSO
+  WOZMON

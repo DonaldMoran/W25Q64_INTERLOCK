@@ -7,9 +7,11 @@
 #define CMD_SYS_STATUS  0x03  // Args: None. Returns: Status String
 #define CMD_SYS_SET_TIME 0x04 // Args: "YYYY-MM-DD HH:MM:SS"
 #define CMD_SYS_GET_TIME 0x05 // Args: None. Returns: Time String
+#define CMD_TIMER_START 0x06  // Args: None. Starts a benchmark timer.
+#define CMD_TIMER_STOP  0x07  // Args: None. Stops timer, returns 4-byte duration in us.
 #define CMD_RESET       0x0F  // Args: None. Resets Pico
 
-// --- FILESYSTEM COMMANDS (0x10 - 0x2F) ---
+// --- FILESYSTEM COMMANDS (0x10 - 0x2F) - KEEP IN SYNC WITH pico_def.inc ---
 #define CMD_FS_MOUNT    0x10  // Args: None. Mounts the W25Q64
 #define CMD_FS_LIST     0x11  // Args: [Path]. Aliases: DIR, LS
 #define CMD_FS_OPEN     0x12  // Args: [Filename]. Returns: File Handle / Size
@@ -36,6 +38,8 @@
 #define CMD_FS_REMOVE_RECURSIVE 0x25 // Args: [Path]. Recursive remove
 #define CMD_FS_DELETE_CONTENTS  0x26 // Args: [Path]. Delete all files in dir
 #define CMD_FS_TREE     0x27  // Args: [Path]. Returns: Stream of tree text
+#define CMD_FS_SPACE    0x28  // Args: None. Returns: [total(4)][used(4)][bsize(4)]
+#define CMD_FS_LIST_SIZE 0x29 // Args: [Path]. Returns: [Size(4)]
 
 // --- NETWORK COMMANDS (0x30 - 0x4F) ---
 #define CMD_NET_STATUS     0x30  // Args: None. Returns: Status (0=Down, 1=Up)
@@ -46,6 +50,9 @@
 #define CMD_NET_HTTP_POST  0x35  // Args: [IP]\0[Port]\0[Src]\0[Dst]. Returns: Status
 #define CMD_NET_TIME       0x36  // Args: None. Returns: Time String
 #define CMD_DOWNLOAD_SIMPLE 0x37  // Args: [RemotePath]\0[LocalPath]. Returns: File Content (raw)
+#define CMD_NET_NEWS       0x38  // Args: [Host]\0[Port]\0[Path] (optional). Returns: Framed stream
+#define CMD_NET_WEATHER    0x39  // Args: [Location] (optional). Returns: Framed stream
+#define CMD_NET_RLIST      0x3A  // Args: [IP]\0[Port]\0[RemotePath]. Returns: Framed stream
 
 // --- STATUS CODES ---
 #define STATUS_OK       0x00

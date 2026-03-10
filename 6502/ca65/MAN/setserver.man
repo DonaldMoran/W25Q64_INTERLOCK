@@ -1,0 +1,18 @@
+NAME
+  SETSERVER - Set File Server (External)
+
+SYNOPSIS
+  SETSERVER [ip:port]
+
+DESCRIPTION
+  Sets the IP address and port of the
+  remote file server for GET/PUT/RLIST.
+  
+  If no argument is given, displays
+  current setting.
+
+EXAMPLES
+  SETSERVER 192.168.1.100:8000
+
+SEE ALSO
+  GET, PUT, RLIST

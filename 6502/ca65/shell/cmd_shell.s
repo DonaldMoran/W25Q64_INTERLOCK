@@ -85,8 +85,15 @@ line_count:       .res 1   ; Counter for paging
 .segment "DDOS"
 
 DDOS_START:
-    ; Start on a fresh line
-    jsr CRLF
+    ; --- SANITIZE STATE FROM TRANSIENT PROGRAMS ---
+    cld             ; CRITICAL: Ensure we are in Binary Mode, not Decimal
+    sei             ; CRITICAL: Disable interrupts (BASIC leaves timers running)
+    ; Clear screen and home cursor
+    lda #<ANSI_CLS
+    sta ptr_temp
+    lda #>ANSI_CLS
+    sta ptr_temp+1
+    jsr print_string_raw
 
     ; -----------------------------------------------------------------------
     ; Debug: Print Start Marker "STR"
@@ -365,8 +372,7 @@ dispatch_command:
     inx
     lda command_table, x
     sta str_ptr1+1
-    jsr call_handler_indirect
-    rts ; Return to shell_loop
+    jmp call_handler_indirect ; Tail-call optimization saves 1 byte
 
 ; ---------------------------------------------------------------------------
 ; try_external
@@ -599,6 +605,8 @@ unknown_command:
 ; --- JSR-indirect trampoline ---
 call_handler_indirect:
     ; Jumps to the routine pointed to by str_ptr1.
+    ; Stack Safety: The target routine MUST return via RTS to maintain stack balance.
+    ; Register Safety: A, X, Y are clobbered by the handler.
     ; The RTS from the called handler will return to our caller.
     jmp (str_ptr1)
 
@@ -646,12 +654,50 @@ do_dir:
     stx ARG_LEN
 
 @send_request:
+    ; --- PRE-CHECK: Get Listing Size ---
+    lda #CMD_FS_LIST_SIZE
+    sta CMD_ID
+    jsr pico_send_request
+    bcc @size_ok
+    jsr timeout_error
+    rts
+
+@size_ok:
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    beq @check_len
+    ; If size check failed (e.g. dir not found), let standard error handling run
+    cmp #STATUS_NO_FILE
+    bne @dir_fail_generic
+    jsr print_file_not_found
+    rts
+@dir_fail_generic:
+    jmp print_command_failed
+
+@check_len:
+    ; Check if Size > 1024 (High Byte >= 4)
+    ; Size is in RESP_BUFF (Little Endian 32-bit)
+    lda RESP_BUFF+3
+    bne @too_big
+    lda RESP_BUFF+2
+    bne @too_big
+    lda RESP_BUFF+1
+    cmp #4
+    bcs @too_big
+
+    ; --- Size OK: Request Data ---
     lda #CMD_FS_LIST
     sta CMD_ID
     jsr pico_send_request
     bcc @dir_ok
-    jsr timeout_error
-    rts
+    
+@too_big:
+    ; Buffer Overflow would occur. Warn user and abort to save bus sync.
+    lda #<DIR_TIMEOUT_MSG
+    sta ptr_temp
+    lda #>DIR_TIMEOUT_MSG
+    sta ptr_temp+1
+    jmp print_string_crlf ; This will print the message and then RTS
 @dir_ok:
     lda LAST_STATUS
     cmp #STATUS_OK
@@ -661,18 +707,15 @@ do_dir:
     jsr print_file_not_found
     rts
 @dir_fail:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 @dir_success:
     jsr CRLF
     ; Print the response string directly from the buffer.
     ; Paging is handled by shell_outch inside print_response.
-    jsr print_response
-    rts
+    jmp print_response
 
 @dir_path_error:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 do_pwd:
     jsr guard_requires_mount
@@ -687,8 +730,7 @@ do_pwd:
     jsr print_string
     
 @pwd_done:
-    jsr CRLF
-    rts
+    jmp CRLF
 
 
 do_cd:
@@ -734,15 +776,21 @@ do_cd:
     
     lda LAST_STATUS
     cmp #STATUS_OK
+    bne @check_fail
+
+    ; Check if it is a directory (Type 2)
+    lda RESP_BUFF
+    cmp #2
     beq @update_path
+    jmp print_command_failed
+
+@check_fail:
     cmp #STATUS_NO_FILE
     bne @cd_fail
-    jsr print_file_not_found
-    rts
+    jmp print_file_not_found
 
 @cd_fail:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 @update_path:
     ; Copy ARG_BUFF to current_path
@@ -806,8 +854,7 @@ do_cd:
     rts
 
 @path_too_long:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 do_mkdir:
     jsr guard_requires_mount
@@ -841,21 +888,18 @@ do_mkdir:
     beq @mkdir_success
     cmp #STATUS_NO_FILE
     bne @mkdir_fail
-    jsr print_file_not_found
-    rts
+    jmp print_file_not_found
 @mkdir_fail:
     cmp #STATUS_EXIST
     bne @mkdir_err
-    jsr print_file_exists
-    rts
+    jmp print_file_exists
 @mkdir_err:
-    jsr print_command_failed
+    jmp print_command_failed
 @mkdir_success:
     rts
 
 @path_error:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 do_del:
     jsr guard_requires_mount
@@ -890,19 +934,16 @@ do_del:
     beq @del_success
     cmp #STATUS_NO_FILE
     bne @del_fail
-    jsr print_file_not_found
-    rts
+    jmp print_file_not_found
     
 @del_fail:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
     
 @del_success:
     rts
 
 @path_error:
-    jsr print_command_failed    ; Reuse existing argument error message
-    rts
+    jmp print_command_failed    ; Reuse existing argument error message
 
 
 do_mount:
@@ -933,8 +974,7 @@ do_mount:
 
 @mount_fail:
     ; The pico reported an error, print a generic fail message
-    jsr print_mount_fail
-    rts
+    jmp print_mount_fail
 
 do_format:
     lda #CMD_FS_FORMAT
@@ -957,8 +997,7 @@ do_format:
     jsr CRLF
     rts
 @format_fail:
-    jsr print_format_fail
-    rts
+    jmp print_format_fail
 
 do_ping:
     lda #CMD_SYS_PING
@@ -981,8 +1020,7 @@ do_ping:
 
     ; Print the response (Expect "PONG")
     jsr print_response
-    jsr CRLF
-    rts
+    jmp CRLF
 
 do_connect:
     jsr guard_requires_mount
@@ -1052,16 +1090,14 @@ do_connect:
     lda LAST_STATUS
     cmp #STATUS_OK
     beq @connect_success
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 @connect_success:
     lda #<CONNECT_OK_MSG
     sta ptr_temp
     lda #>CONNECT_OK_MSG
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 do_help:
     lda #<HELP_MSG
@@ -1069,8 +1105,7 @@ do_help:
     lda #>HELP_MSG
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 do_exit:
     jmp RESET
@@ -1172,11 +1207,9 @@ do_savemem:
     beq @start_stream
     cmp #STATUS_NO_FILE
     bne @savemem_fail
-    jsr print_file_not_found
-    rts
+    jmp print_file_not_found
 @savemem_fail:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 @start_stream:
     ; Initialize streaming pointers
@@ -1282,11 +1315,9 @@ do_loadmem:
     beq @loadmem_file_exists
     cmp #STATUS_NO_FILE
     bne @loadmem_stat_fail
-    jsr print_file_not_found
-    rts
+    jmp print_file_not_found
 @loadmem_stat_fail:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 @loadmem_file_exists:
     jsr common_send_loadmem_request
@@ -1299,8 +1330,7 @@ do_loadmem:
     jsr print_file_not_found
     rts
 @loadmem_fail:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 @status_ok:
     jsr common_read_stream_to_mem
@@ -1311,8 +1341,7 @@ do_loadmem:
     lda #>SAVED_MSG
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 cmd_parse_error:
     lda #<PARSE_ERROR_MSG
@@ -1320,8 +1349,7 @@ cmd_parse_error:
     lda #>PARSE_ERROR_MSG
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 cmd_arg_error:
     lda #<ARG_ERROR_MSG
@@ -1329,8 +1357,7 @@ cmd_arg_error:
     lda #>ARG_ERROR_MSG
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 cmd_invalid_range:
     lda #<RANGE_ERROR_MSG
@@ -1338,8 +1365,7 @@ cmd_invalid_range:
     lda #>RANGE_ERROR_MSG
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 timeout_error:
     jsr CRLF
@@ -1348,8 +1374,7 @@ timeout_error:
     lda #>ERR_MSG
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 ; ---------------------------------------------------------------------------
 ; do_type - Type file content to screen
@@ -1388,19 +1413,16 @@ do_type:
     beq @type_file_exists
     cmp #STATUS_NO_FILE
     bne @type_stat_fail
-    jsr print_file_not_found
-    rts
+    jmp print_file_not_found
 @type_stat_fail:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 @type_file_exists:
     ; Check if target is a directory
     lda RESP_BUFF
     cmp #2          ; LFS_TYPE_DIR
     bne @is_file
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 @is_file:
     ; Restore Y for extension check (ARG_LEN - 1)
     ldx ARG_LEN
@@ -1456,8 +1478,7 @@ do_type:
     jsr print_file_not_found
     rts
 @type_fail:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 @status_ok:
     ; Init Hex Dump variables if needed
@@ -1677,7 +1698,9 @@ common_transfer:
     ; Semantic check: is it a directory according to the filesystem?
     ; For the STAT check, ARG_BUFF already contains the new path
     ldx ptr_temp
-    stx ARG_LEN
+    inx
+    stx ARG_LEN             ; Set length INCLUDING null terminator
+    dex                     ; Restore X to original length for later logic
     lda #CMD_FS_STAT
     sta CMD_ID
     jsr pico_send_request
@@ -1796,8 +1819,7 @@ common_transfer:
     jsr print_file_exists
     rts
 @rename_err:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 @rename_success:
     clc
@@ -1835,12 +1857,11 @@ do_touch:
     lda LAST_STATUS
     cmp #STATUS_OK
     beq @touch_success
-    jsr print_command_failed
+    jmp print_command_failed
 @touch_success:
     rts
 @path_error:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 ; ---------------------------------------------------------------------------
 ; resolve_path_to_arg_buff
@@ -2001,11 +2022,9 @@ do_run:
     beq @run_file_exists
     cmp #STATUS_NO_FILE
     bne @run_stat_fail
-    jsr print_file_not_found
-    rts
+    jmp print_file_not_found
 @run_stat_fail:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 @run_file_exists:
     jsr common_send_loadmem_request
@@ -2018,8 +2037,7 @@ do_run:
     jsr print_file_not_found
     rts
 @run_fail:
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 @status_ok:
     ; Check if length >= 2
@@ -2032,8 +2050,7 @@ do_run:
     ; Error: File too short
     lda #$FF
     sta VIA_DDRA
-    jsr print_command_failed
-    rts
+    jmp print_command_failed
 
 @len_ok:
     ; Read Load Address (2 bytes)
@@ -2072,8 +2089,8 @@ do_run:
     sta str_ptr1+1
 
     jsr call_handler_indirect
-    jsr shell_crlf  ; Add a newline after the program finishes
-    rts
+    ; Stack Safety: The loaded program MUST end with RTS to return here.
+    jmp shell_crlf  ; Add a newline after the program finishes
 
 ; ---------------------------------------------------------------------------
 ; do_jump - Jump to address
@@ -2098,8 +2115,7 @@ do_echo:
     lda arg_ptr+1
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 ; ---------------------------------------------------------------------------
 ; common_send_loadmem_request
@@ -2292,8 +2308,7 @@ print_response:
     jmp @pr_loop
 
 @pr_done:
-    jsr shell_crlf  ; Ensure we end on a new line
-    rts
+    jmp shell_crlf  ; Ensure we end on a new line
 
 ; ---------------------------------------------------------------------------
 ; Helper: Print String from ptr_temp (Paging Enabled)
@@ -2308,6 +2323,10 @@ print_string:
     jmp @loop
 @done:
     rts
+
+print_string_crlf:
+    jsr print_string
+    jmp shell_crlf
 
 ; ---------------------------------------------------------------------------
 ; Helper: Print String Raw (No Paging) - Used for "More" prompt
@@ -2391,8 +2410,7 @@ print_not_mounted:
     lda #>NOT_MOUNTED_MSG
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 print_mount_fail:
     lda #<MOUNT_FAIL_MSG
@@ -2400,8 +2418,7 @@ print_mount_fail:
     lda #>MOUNT_FAIL_MSG
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 print_format_fail:
     lda #<FORMAT_FAIL_MSG
@@ -2409,8 +2426,7 @@ print_format_fail:
     lda #>FORMAT_FAIL_MSG
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 print_command_failed:
     lda #<COMMAND_FAILED_MSG
@@ -2418,8 +2434,7 @@ print_command_failed:
     lda #>COMMAND_FAILED_MSG
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 print_file_not_found:
     lda #<FILE_NOT_FOUND_MSG
@@ -2427,8 +2442,7 @@ print_file_not_found:
     lda #>FILE_NOT_FOUND_MSG
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 print_file_exists:
     lda #<FILE_EXISTS_MSG
@@ -2436,8 +2450,7 @@ print_file_exists:
     lda #>FILE_EXISTS_MSG
     sta ptr_temp+1
     jsr print_string
-    jsr CRLF
-    rts
+    jmp CRLF
 
 ; ---------------------------------------------------------------------------
 ; strcmp_space
@@ -2599,6 +2612,7 @@ hex_nibble: ; in: A, out: A=nibble, C=0 on success, C=1 on error
 ; DATA
 ; ===========================================================================
 
+DIR_TIMEOUT_MSG: .asciiz "DIR BUFFER FULL. Use CATALOG."
 
 
 ; --- Command Dispatch Table ---
@@ -2673,31 +2687,32 @@ str_bin_suffix:.asciiz ".BIN"
 str_run_prefix:.asciiz "RUN "
 str_autoexec:    .asciiz "/AUTOEXEC.BAT"
 str_do_autoexec: .asciiz "DO /AUTOEXEC.BAT"
+ANSI_CLS:        .byte $1B, "[2J", $1B, "[H", 0
 
 START_MSG:       .asciiz "DDos 6502 Shell Ready"
 MORE_MSG:        .asciiz "--More--"
 ERR_MSG:         .asciiz "TIMEOUT"
 UNK_MSG:         .asciiz "UNKNOWN"
 HELP_MSG:
-    .byte "BUILT-IN: CD CONNECT CP DEL DIR ECHO EXIT FORMAT HELP LOADMEM MKDIR MOUNT PING PWD MV RUN SAVEMEM TOUCH CAT", $0D, $0A
-    .byte "EXTERNAL: *See BIN/ or docs", 0
+    .byte "INT: CD CONNECT CP DEL DIR ECHO EXIT FORMAT HELP LOADMEM MKDIR MOUNT PING PWD MV RUN SAVEMEM TOUCH CAT", $0D, $0A
+    .byte "EXT: *See BIN/ or docs", 0
 NOT_MOUNTED_MSG: .asciiz "NO MOUNT"
-MOUNT_OK_MSG:    .asciiz "MEDIA MOUNTED"
+MOUNT_OK_MSG:    .asciiz "MOUNTED"
 CONNECT_OK_MSG: .asciiz "CONNECTED"
-MOUNT_FAIL_MSG:  .asciiz "FAILED"
-FORMAT_OK_MSG:   .asciiz "FORMAT COMPLETE"
-FORMAT_FAIL_MSG: .asciiz "FAILED"
+MOUNT_FAIL_MSG:
+FORMAT_FAIL_MSG:
 COMMAND_FAILED_MSG: .asciiz "FAILED"
+FORMAT_OK_MSG:   .asciiz "DONE"
 FILE_NOT_FOUND_MSG: .asciiz "NOT FOUND"
-FILE_EXISTS_MSG:    .asciiz "FILE EXISTS"
-WAIT_MSG:           .asciiz "Please wait..."
+FILE_EXISTS_MSG:    .asciiz "EXISTS"
+WAIT_MSG:           .asciiz "Wait..."
 
 ; --- SAVEMEM Messages ---
 SAVING_MSG:         .asciiz "Saving..."
 SAVED_MSG:          .asciiz "Done"
-PARSE_ERROR_MSG:    .asciiz "Parse error"
-ARG_ERROR_MSG:      .asciiz "Argument error"
-RANGE_ERROR_MSG:    .asciiz "Invalid range"
+PARSE_ERROR_MSG:    .asciiz "Bad hex"
+ARG_ERROR_MSG:      .asciiz "Arg err"
+RANGE_ERROR_MSG:    .asciiz "Bad range"
 
 ; ---------------------------------------------------------------------------
 ; Local System Call Implementations

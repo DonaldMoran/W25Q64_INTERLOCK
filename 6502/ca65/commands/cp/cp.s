@@ -67,6 +67,13 @@ start:
     jsr CRLF
 
 done:
+    ; Standard Exit: Restore registers and return
+    pla
+    tay
+    pla
+    tax
+    pla
+    plp
     clc
     rts
 
@@ -77,8 +84,7 @@ show_usage:
     sta t_str_ptr1+1
     jsr print_string
     jsr CRLF
-    clc
-    rts
+    jmp done
 
 ; ---------------------------------------------------------------------------
 ; parse_path

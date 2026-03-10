@@ -1,0 +1,14 @@
+NAME
+  TAIL - Print End of File (External)
+
+SYNOPSIS
+  TAIL [file]
+
+DESCRIPTION
+  Prints the last 10 lines of a file.
+
+EXAMPLES
+  TAIL LOG.TXT
+
+SEE ALSO
+  HEAD, CAT

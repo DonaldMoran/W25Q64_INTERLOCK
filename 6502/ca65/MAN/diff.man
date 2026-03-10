@@ -1,0 +1,15 @@
+NAME
+  DIFF - Compare Files (External)
+
+SYNOPSIS
+  DIFF [file1] [file2]
+
+DESCRIPTION
+  Compares two files line by line and
+  shows differences.
+
+EXAMPLES
+  DIFF A.TXT B.TXT
+
+SEE ALSO
+  CMP

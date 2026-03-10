@@ -1,0 +1,16 @@
+NAME
+  COPY - Copy File (Internal)
+
+SYNOPSIS
+  COPY [src] [dst]
+  CP   [src] [dst]
+
+DESCRIPTION
+  Copies a file from source to
+  destination.
+
+EXAMPLES
+  COPY A.TXT B.TXT
+
+SEE ALSO
+  MV, RENAME
