@@ -5,9 +5,10 @@ SYNOPSIS
   BASICW
 
 DESCRIPTION
-  Warm starts Microsoft BASIC,
+  Warm starts Microsoft BASIC, 
   attempting to preserve the program
-  currently in memory.
+  currently in memory. The warm vector 
+  is recorded in zero page at $03.
 
 EXAMPLES
   BASICW

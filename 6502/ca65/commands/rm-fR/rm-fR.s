@@ -36,6 +36,10 @@ start:
     tya
     pha
 
+    ; Sanitize CPU state
+    cld
+    sei
+
     ; -----------------------------------------------------------------------
     ; Parse Arguments
     ; The shell executes us via: RUN /BIN/RM-FR.BIN <ARGS>
@@ -120,27 +124,28 @@ done:
 ; ---------------------------------------------------------------------------
 skip_word:
     ldy #0
-@skip_char:
+@skip_chars:
     lda (t_ptr_temp), y
-    beq @done           ; End of string
+    beq @sw_done
     cmp #' '
     beq @found_space
-    inc t_ptr_temp
-    bne @skip_char
-    inc t_ptr_temp+1
-    jmp @skip_char
+    iny
+    jmp @skip_chars
 @found_space:
-    ; Skip the space(s)
 @skip_spaces:
+    iny
     lda (t_ptr_temp), y
-    beq @done
+    beq @sw_done
     cmp #' '
-    bne @done           ; Found start of next word
-    inc t_ptr_temp
-    bne @skip_spaces
-    inc t_ptr_temp+1
-    jmp @skip_spaces
-@done:
+    beq @skip_spaces
+@sw_done:
+    tya
+    clc
+    adc t_ptr_temp
+    sta t_ptr_temp
+    lda #0
+    adc t_ptr_temp+1
+    sta t_ptr_temp+1
     rts
 
 ; ---------------------------------------------------------------------------

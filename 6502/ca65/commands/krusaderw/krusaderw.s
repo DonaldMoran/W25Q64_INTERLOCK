@@ -8,4 +8,8 @@ WARM_START = $F01C
 
 .segment "CODE"
 start:
+    ; Sanitize CPU state before jumping
+    cld
+    sei
+
     jmp WARM_START

@@ -6,7 +6,8 @@ SYNOPSIS
 
 DESCRIPTION
   Clears the terminal screen and
-  moves cursor to home position.
+  moves cursor to home position
+  using ANSI sequences.
 
 EXAMPLES
   CLS

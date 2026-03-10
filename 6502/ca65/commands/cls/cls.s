@@ -1,15 +1,8 @@
-;
-; ANSI Clear Screen Program for 65C02
-; Outputs ESC[2J to clear the screen
-; Assumes a serial terminal or ANSI-compatible display
-;
+; cls.s - Clear Screen
+; Usage: CLS
 
-; Zero page variables
-SCRATCH = $58          ; Temporary storage
-
-; Memory-mapped I/O location for serial output
-; Change this address to match your hardware
-IO_PORT = $5000
+; System calls
+OUTCH = $FFEF
 
 ; ---------------------------------------------------------------------------
 ; HEADER - MUST be first (2-byte load address for RUN command)
@@ -22,82 +15,50 @@ IO_PORT = $5000
 ; ---------------------------------------------------------------------------
 .segment "CODE"
 
-RESET:
-   
+start:
+    ; Standard Entry: Preserve registers and sanitize CPU state
+    php
+    pha
+    txa
+    pha
+    tya
+    pha
+    cld
+    sei
+
     ; Clear the screen with ANSI sequence
-    JSR CLEAR_SCREEN
-    
-    ; Return to the monitor
-    RTS 
+    jsr clear_screen
+
+done:
+    ; Standard Exit: Restore registers and return
+    pla
+    tay
+    pla
+    tax
+    pla
+    plp
+    clc              ; Return with carry clear
+    rts
+
 ;-----------------------------------------------------------
-; CLEAR_SCREEN - Output ANSI escape sequence to clear screen
-; Destroys: A
+; clear_screen - Output ANSI escape sequence to clear screen
 ;-----------------------------------------------------------
-CLEAR_SCREEN:
+clear_screen:
     ; Start with ESC character
     LDA #$1B           ; ESC character
-    JSR OUT_CHAR
-    
-    ; Send the '[' character
+    JSR OUTCH
     LDA #'['
-    JSR OUT_CHAR
-    
-    ; Send the '2' character
+    JSR OUTCH
     LDA #'2'
-    JSR OUT_CHAR
-    
-    ; Send the 'J' character
+    JSR OUTCH
     LDA #'J'
-    JSR OUT_CHAR
-    
-    ; Optional: Move cursor to home position (1;1)
-    ; Uncomment if you want cursor at top-left
+    JSR OUTCH
+
+    ; Move cursor to home position (1;1)
     LDA #$1B
-    JSR OUT_CHAR
+    JSR OUTCH
     LDA #'['
-    JSR OUT_CHAR
-    LDA #'1'
-    JSR OUT_CHAR
-    LDA #';'
-    JSR OUT_CHAR
-    LDA #'1'
-    JSR OUT_CHAR
+    JSR OUTCH
     LDA #'H'
-    JSR OUT_CHAR
-    
-    RTS
-
-;-----------------------------------------------------------
-; OUT_CHAR - Output character to I/O port
-; Input: A = character to output
-; Destroys: None (preserves A, X, Y)
-;-----------------------------------------------------------
-OUT_CHAR:
-    PHA                ; Save accumulator
-OUT_WAIT:
-    ; Optional: Add hardware handshaking here if needed
-    ; For example, check a status register for ready
-    
-    ; Output character to I/O port
-    STA IO_PORT
-    
-    ; Optional: Add delay for slow serial implementations
-    ; JSR DELAY
-    
-    PLA                ; Restore accumulator
-    RTS
-
-;-----------------------------------------------------------
-; DELAY - Simple delay loop (optional)
-; Destroys: X, Y
-;-----------------------------------------------------------
-DELAY:
-    LDX #$FF
-DELAY_LOOP1:
-    LDY #$FF
-DELAY_LOOP2:
-    DEY
-    BNE DELAY_LOOP2
-    DEX
-    BNE DELAY_LOOP1
+    JSR OUTCH
     RTS

@@ -35,6 +35,10 @@ start:
     tya
     pha
 
+    ; Sanitize CPU state
+    cld
+    sei
+
     ; Send command to Pico
     lda #CMD_FS_SPACE
     sta CMD_ID

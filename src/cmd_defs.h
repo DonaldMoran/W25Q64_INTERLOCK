@@ -7,6 +7,8 @@
 #define CMD_SYS_STATUS  0x03  // Args: None. Returns: Status String
 #define CMD_SYS_SET_TIME 0x04 // Args: "YYYY-MM-DD HH:MM:SS"
 #define CMD_SYS_GET_TIME 0x05 // Args: None. Returns: Time String
+#define CMD_TIMER_START 0x06  // Args: None. Starts a benchmark timer.
+#define CMD_TIMER_STOP  0x07  // Args: None. Stops timer, returns 4-byte duration in us.
 #define CMD_RESET       0x0F  // Args: None. Resets Pico
 
 // --- FILESYSTEM COMMANDS (0x10 - 0x2F) - KEEP IN SYNC WITH pico_def.inc ---

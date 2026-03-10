@@ -11,6 +11,10 @@ WARM_VECTOR = $0003
 
 .segment "CODE"
 start:
+    ; Sanitize CPU state
+    cld
+    sei
+
     ; Check if Warm Start Vector is valid.
     ; We check the high byte ($04). If it is 0, it implies the address is in
     ; Zero Page ($00xx), which is invalid for code execution.

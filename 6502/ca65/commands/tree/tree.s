@@ -35,6 +35,10 @@ start:
     tya
     pha
 
+    ; Sanitize CPU state (especially after BASIC exits)
+    cld
+    sei
+
     ; Initialize paging counter
     lda #0
     sta t_line_cnt
@@ -42,13 +46,7 @@ start:
     ; -----------------------------------------------------------------------
     ; Parse Arguments (Optional Path)
     ; -----------------------------------------------------------------------
-    lda #<INPUT_BUFFER
-    sta t_ptr_temp
-    lda #>INPUT_BUFFER
-    sta t_ptr_temp+1
-
-    jsr skip_word ; Skip "RUN"
-    jsr skip_word ; Skip "/BIN/TREE.BIN"
+    jsr skip_cmd_args
 
     ; Copy argument if present
     ldy #0
@@ -150,55 +148,22 @@ start:
     rts
 
 ; ---------------------------------------------------------------------------
-; Helper: Skip word
-; ---------------------------------------------------------------------------
-skip_word:
-    ldy #0
-@skip_char:
-    lda (t_ptr_temp), y
-    beq @done
-    cmp #' '
-    beq @found_space
-    inc t_ptr_temp
-    bne @skip_char
-    inc t_ptr_temp+1
-    jmp @skip_char
-@found_space:
-@skip_spaces:
-    lda (t_ptr_temp), y
-    beq @done
-    cmp #' '
-    bne @done
-    inc t_ptr_temp
-    bne @skip_spaces
-    inc t_ptr_temp+1
-    jmp @skip_spaces
-@done:
-    rts
-
-; ---------------------------------------------------------------------------
 ; Helper: Print String
 ; ---------------------------------------------------------------------------
 print_string:
     pha
-    tya
-    pha
+    phy
     ldy #0
-@loop:
+@ps_loop:
     lda (t_str_ptr1), y
-    beq @done
+    beq @ps_done
     jsr OUTCH
     iny
-    jmp @loop
-@done:
-    pla
-    tay
+    jmp @ps_loop
+@ps_done:
+    ply
     pla
     rts
-
-.segment "RODATA"
-msg_fail:  .asciiz "Error: Failed to list tree"
-msg_more:  .asciiz "--More--"
 
 ; ---------------------------------------------------------------------------
 ; Helper: Paging output routines (adapted from rlist)
@@ -208,16 +173,16 @@ paging_outch:
     jsr OUTCH
     pla
     cmp #$0A        ; is it a newline?
-    bne @done
+    bne @po_done
     jsr check_paging
-@done:
+@po_done:
     rts
 
 check_paging:
     inc t_line_cnt
     lda t_line_cnt
     cmp #22         ; 22 lines per page
-    bcc @done
+    bcc @cp_done
 
     ; Print --More-- and wait for key
     lda #<msg_more
@@ -232,6 +197,49 @@ check_paging:
     jsr CRLF
     lda #0
     sta t_line_cnt
-.segment "RODATA"
-@done:
+@cp_done:
     rts
+
+; ---------------------------------------------------------------------------
+; Helper: Skip past "RUN" and "/BIN/CMD.BIN" to find arguments
+; Out: t_ptr_temp points to the start of the first argument, or a null
+;      terminator if no arguments are present.
+; ---------------------------------------------------------------------------
+skip_cmd_args:
+    lda #<INPUT_BUFFER
+    sta t_ptr_temp
+    lda #>INPUT_BUFFER
+    sta t_ptr_temp+1
+    jsr skip_word ; Skips "RUN" or alias
+    jsr skip_word ; Skips "/BIN/TREE.BIN"
+    rts
+
+skip_word:
+    ldy #0
+@skip_chars:
+    lda (t_ptr_temp), y
+    beq @sw_done
+    cmp #' '
+    beq @found_space
+    iny
+    jmp @skip_chars
+@found_space:
+@skip_spaces:
+    iny
+    lda (t_ptr_temp), y
+    beq @sw_done
+    cmp #' '
+    beq @skip_spaces
+@sw_done:
+    tya
+    clc
+    adc t_ptr_temp
+    sta t_ptr_temp
+    lda #0
+    adc t_ptr_temp+1
+    sta t_ptr_temp+1
+    rts
+
+.segment "RODATA"
+msg_fail:  .asciiz "Error: Failed to list tree"
+msg_more:  .asciiz "--More--"

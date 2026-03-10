@@ -35,6 +35,10 @@ start:
     tya
     pha
 
+    ; Sanitize CPU state
+    cld
+    sei
+
     ; Print "Deleting all files in "
     lda #<msg_start
     sta t_str_ptr1

@@ -21,32 +21,6 @@ t_str_ptr2   = $5C  ; 2 bytes - Temporary pointer
 t_ptr_temp   = $5E  ; 2 bytes - Temporary pointer
 
 ; ---------------------------------------------------------------------------
-; Additional zero page variables for calculator
-; ---------------------------------------------------------------------------
-temp1        = $60  ; 2 bytes - Temporary storage
-temp2        = $62  ; 2 bytes - Temporary storage
-input_ptr    = $64  ; 2 bytes - Input buffer pointer
-
-; ---------------------------------------------------------------------------
-; Decimal conversion variables
-; ---------------------------------------------------------------------------
-dec_value_lo        = $66  ; 1 byte
-dec_value_hi        = $67  ; 1 byte  
-dec_temp_ten_thousands = $68 ; 1 byte
-dec_temp_thousands  = $69 ; 1 byte
-dec_temp_hundreds   = $6A ; 1 byte
-dec_temp_tens_ones  = $6B ; 1 byte
-
-; ---------------------------------------------------------------------------
-; Math expression variables
-; ---------------------------------------------------------------------------
-math_operator   = $6C  ; 1 byte - Operator character
-math_num1_lo    = $6D  ; 1 byte - First number low byte
-math_num1_hi    = $6E  ; 1 byte - First number high byte
-math_num2_lo    = $6F  ; 1 byte - Second number low byte
-math_num2_hi    = $70  ; 1 byte - Second number high byte
-
-; ---------------------------------------------------------------------------
 ; Constants
 ; ---------------------------------------------------------------------------
 CMD_CALC        = $20   ; Example command ID (adjust as needed)
@@ -65,6 +39,24 @@ LF              = $0A
 .segment "BSS"
 INPUT_BUFFER:  .res 128  ; Input buffer for hex/dec/str strings
 
+; Moved from Zero Page to BSS to comply with $58-$5F limit
+temp1:         .res 2
+temp2:         .res 2
+; input_ptr was unused
+
+dec_value_lo:           .res 1
+dec_value_hi:           .res 1
+dec_temp_ten_thousands: .res 1
+dec_temp_thousands:     .res 1
+dec_temp_hundreds:      .res 1
+dec_temp_tens_ones:     .res 1
+
+math_operator: .res 1
+math_num1_lo:  .res 1
+math_num1_hi:  .res 1
+math_num2_lo:  .res 1
+math_num2_hi:  .res 1
+
 ; ---------------------------------------------------------------------------
 ; CODE - Program starts here
 ; ---------------------------------------------------------------------------
@@ -78,6 +70,10 @@ start:
     pha
     tya
     pha
+
+    ; Sanitize CPU state
+    cld
+    sei
 
 main_loop:
     ; Display the full menu
@@ -590,7 +586,9 @@ math_eval:
     cmp #'*'
     beq @multiply
     cmp #'/'
-    beq @divide
+    bne @not_divide
+    jmp @divide
+@not_divide:
     jmp @invalid_expr
 
 @add:
@@ -632,7 +630,9 @@ math_eval:
 @mult_loop:
     lda temp2
     ora temp2+1
-    beq @show_result
+    bne @mult_continue
+    jmp @show_result
+@mult_continue:
     clc
     lda temp1
     adc math_num1_lo

@@ -39,6 +39,10 @@ start:
     tya
     pha
 
+    ; Sanitize CPU state
+    cld
+    sei
+
     ; Initialize paging counter
     lda #0
     sta t_line_cnt

@@ -1,0 +1,16 @@
+NAME
+    NUKE - Remove "ABC.S" artifact
+
+SYNOPSIS
+    NUKE
+
+DESCRIPTION
+    Removes a specific file named "ABC.S" (containing quotes
+    and a non-printable DEL character) that is sometimes
+    created during Krusader assembler testing.
+
+    This command is useful because the filename cannot be
+    easily typed at the standard command prompt.
+
+SEE ALSO
+    RM, DEL

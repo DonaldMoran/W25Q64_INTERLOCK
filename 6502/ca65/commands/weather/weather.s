@@ -36,6 +36,10 @@ start:
     tya
     pha
 
+    ; Sanitize CPU state
+    cld
+    sei
+
     ; --- Argument Parsing ---
     ; Find start of arguments after "RUN /BIN/WEATHER.BIN"
     lda #<INPUT_BUFFER

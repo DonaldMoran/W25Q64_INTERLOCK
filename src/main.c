@@ -539,7 +539,10 @@ int main() {
     uint8_t cmd_id;
     uint8_t arg_len;
     uint8_t arg_buf[256];
-    
+
+    absolute_time_t timer_start_time;
+    bool timer_running = false;
+
     // Buffers for Response
     uint8_t resp_buf[4096]; // Increased for larger DIR listings and faster streaming
 
@@ -780,6 +783,30 @@ int main() {
                         payload_len = len;
                     } else {
                         resp_buf[0] = STATUS_ERR; // RTC not running
+                        payload_len = 0;
+                    }
+                }
+                break;
+
+            case CMD_TIMER_START:
+                {
+                    timer_start_time = get_absolute_time();
+                    timer_running = true;
+                    resp_buf[0] = STATUS_OK;
+                    payload_len = 0;
+                }
+                break;
+
+            case CMD_TIMER_STOP:
+                {
+                    if (timer_running) {
+                        uint32_t duration_us = absolute_time_diff_us(timer_start_time, get_absolute_time());
+                        memcpy(payload_ptr, &duration_us, 4);
+                        payload_len = 4;
+                        resp_buf[0] = STATUS_OK;
+                        timer_running = false;
+                    } else {
+                        resp_buf[0] = STATUS_ERR; // Timer was not started
                         payload_len = 0;
                     }
                 }
@@ -2280,6 +2307,11 @@ int main() {
                             rtc_set_datetime(&t);
 
                             size_t len = strftime((char*)payload_ptr, 64, "%Y-%m-%d %H:%M:%S", ptm);
+                         if (len >= 64) {
+                             resp_buf[0] = STATUS_ERR; // String too long
+                             payload_len = 0;
+                             break;
+                         }
                             resp_buf[0] = STATUS_OK;
                             payload_len = len;
                         } else {

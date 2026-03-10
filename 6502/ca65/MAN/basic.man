@@ -7,7 +7,7 @@ SYNOPSIS
 DESCRIPTION
   Starts the Microsoft BASIC interpreter.
   
-  Type SYSTEM to exit back to shell.
+  Type DOS to exit back to shell.
 
 EXAMPLES
   BASIC

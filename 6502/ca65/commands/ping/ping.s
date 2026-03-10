@@ -53,6 +53,10 @@ start:
     tya
     pha              ; Save Y
     
+    ; Sanitize CPU state
+    cld
+    sei
+    
     ; ==================== Show we're running ====================
     lda #<debug_prefix
     sta t_str_ptr1

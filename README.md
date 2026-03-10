@@ -229,7 +229,7 @@ The build process involves:
 
 **Build Steps:**
 
-1. Assuming you are still in the build directory for the Bridge pico w from above, navigate to the emmulator directory:
+1. Assuming you are still in the build directory for the Bridge pico w from above, navigate to the emmulator directory and carry out the following. It does try to load using picotool, which will simply fail if not installed or if the pico is not in bootsel mode, however the build will still succeed and the *.uf2 file can be loaded via copy/paste:
 
     ```bash
     cd ..
@@ -596,6 +596,10 @@ start:
     tya
     pha
     
+    ; --- CRITICAL: Sanitize CPU state ---
+    ; MSBASIC is known to exit with Decimal Mode set and interrupts enabled.
+    ; Always clear decimal mode and disable interrupts to ensure robust operation.
+    cld
     ; --- CRITICAL: Sanitize CPU state ---
     ; MSBASIC is known to exit with Decimal Mode set and interrupts enabled.
     ; Always clear decimal mode and disable interrupts to ensure robust operation.
@@ -1223,3 +1227,41 @@ To test changes to the shell without burning a new ROM:
 2. **`DIR` Command Stability:**
     - **Pre-flight Check:** Implemented a pre-flight size check for the `DIR` command. The shell now queries the directory listing size from the Pico first using a new `CMD_FS_LIST_SIZE` opcode.
     - **Bus Synchronization:** If the size exceeds the 1KB buffer, the shell displays the `"DIR BUFFER FULL. Use CATALOG."` message and aborts gracefully *before* any data is sent. This prevents bus desynchronization and ensures system stability when listing large directories.
+
+### 🚩 Milestone: Local Commit `d3f040c`. Development continues from this point
+
+**Accomplishments:**
+
+1. **Transient Command Regression Fixes:**
+    - **`TREE`**: Fixed a critical argument parsing bug that caused the command to fail. Added CPU sanitization (`CLD`, `SEI`) for robustness.
+    - **`BASIC` / `BASICW`**: Added CPU sanitization to ensure clean entry into the BASIC interpreter.
+
+2. **Benchmark Utility (`BENCH`) Overhaul:**
+    - **Protocol Upgrade:** Refactored `BENCH` to use the high-performance streaming protocol (`SAVEMEM`/`LOADMEM`) instead of block-based I/O. This resolved bus deadlocks during large transfers.
+    - **Stability:** Fixed critical bugs in `VIA_DDRA` direction switching and loop counter management that caused bus desynchronization.
+    - **Performance Metrics:** Implemented high-resolution timer commands (`CMD_TIMER_START`/`STOP`) in the Pico firmware.
+    - **Real-time Analysis:** Added a 32-bit division routine to the 6502 code to calculate and display throughput in Bytes/sec directly on the console.
+    - **Results:** The system now achieves a sustained throughput of **~4.0 KB/s** for both reads and writes.
+        - *Comparison:* This performance is slightly faster than a **33.6k modem** (approx. 3.3 KB/s) and significantly faster than a Commodore 1541 disk drive (~400 B/s), validating the efficiency of the interlocked parallel bus and LittleFS integration.
+
+3. **All Transient Commands Audited:**  
+
+    - **Zero Page Validation:** Confirmed the availability of zero page memory locations $50-$5F for use by transient commands and the location of that memory.
+    - **System Stability Enhancements:** Resolved memory-related issues:
+        - Corrected stack corruption bugs in `print_16bit_decimal`, `divide32` and `strstr` routines within benchmark.s.
+        - Addressed VIA_DDRA handling bugs.
+
+    - **All Transient Commands Enhanced:** Incorporated the addition of CPU sanitization and register preservation protocols across all of the transient commands.
+
+    - **`BENCH`**
+        - Addressed issues of failing and provided an accurate and useful summary of the system's file I/O performance.
+        - Developed enhanced logic by reporting
+            - High resolution timer commands (CMD_TIMER_START/STOP) in the Pico firmware.
+            - A 32 bit division routine to the 6502 code to calculate and display throughput in Bytes/sec directly on the console.
+        - Corrected use of CRLF.
+
+    - **`GREP`**
+    - Addressed stack corruption and the inability to read and validate lines and files correctly.
+
+    - **`WRITE`**
+    - Corrected issues pertaining to printing characters.

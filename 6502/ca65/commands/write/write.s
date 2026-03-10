@@ -50,6 +50,10 @@ start:
     tya
     pha
 
+    ; Sanitize CPU state
+    cld
+    sei
+
     ; Save CWD pointer passed from shell in $5E/$5F
     lda t_ptr_temp
     sta cwd_ptr

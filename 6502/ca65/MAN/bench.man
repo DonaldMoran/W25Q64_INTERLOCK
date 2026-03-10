@@ -5,8 +5,9 @@ SYNOPSIS
   BENCH
 
 DESCRIPTION
-  Runs a read/write benchmark on the
-  filesystem to test performance.
+  Runs a read/write and delete 
+  benchmark on the filesystem 
+  to test performance.
 
 EXAMPLES
   BENCH

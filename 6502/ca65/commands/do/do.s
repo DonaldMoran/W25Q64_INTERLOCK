@@ -12,6 +12,7 @@ CRLF  = $FED1
 t_ptr_temp = $5E
 cwd_ptr    = $5E ; Re-use t_ptr_temp as it holds CWD pointer on entry
 t_str_ptr1 = $5A ; Use for temp pointer during resolution
+t_dest_ptr = $5C ; Pointer for writing batch buffer (replaces illegal $50 usage)
 
 .segment "HEADER"
     .word $0800
@@ -25,6 +26,10 @@ start:
     pha
     tya
     pha
+
+    ; Sanitize CPU state
+    cld
+    sei
 
     ; Save CWD pointer (passed in $5E/$5F) to a safe place if needed
     ; But we can just use it directly from $5E/$5F before we clobber it.
@@ -127,7 +132,7 @@ start:
     
     ; Manually send request to handle streaming
     lda #$FF
-    sta $6003 ; DDRA Output
+    sta VIA_DDRA ; DDRA Output
     
     lda CMD_ID
     jsr send_byte
@@ -144,7 +149,7 @@ start:
     
     ; Read Response
     lda #$00
-    sta $6003 ; DDRA Input
+    sta VIA_DDRA ; DDRA Input
     
     jsr read_byte ; Status
     cmp #STATUS_OK
@@ -163,9 +168,9 @@ start:
     
     ; Stream data to BATCH_BUFFER
     lda #<BATCH_BUFFER
-    sta $50 ; Use ZP temp
+    sta t_dest_ptr
     lda #>BATCH_BUFFER
-    sta $51
+    sta t_dest_ptr+1
     
 @stream_loop:
     lda t_ptr_temp
@@ -174,11 +179,11 @@ start:
     
     jsr read_byte
     ldy #0
-    sta ($50), y
+    sta (t_dest_ptr), y
     
-    inc $50
+    inc t_dest_ptr
     bne @no_inc
-    inc $51
+    inc t_dest_ptr+1
 @no_inc:
     
     lda t_ptr_temp
@@ -191,7 +196,7 @@ start:
 @stream_done:
     ; Null terminate the script
     lda #0
-    sta ($50), y
+    sta (t_dest_ptr), y
     
     ; 3. Activate Batch Mode
     lda #<BATCH_BUFFER
@@ -201,7 +206,7 @@ start:
     
     ; Restore and return
     lda #$FF
-    sta $6003 ; Restore DDRA
+    sta VIA_DDRA ; Restore DDRA
     
     pla
     tay
@@ -214,7 +219,7 @@ start:
 
 @load_fail:
     lda #$FF
-    sta $6003
+    sta VIA_DDRA
     
     lda #<msg_fail
     sta t_str_ptr1
@@ -228,7 +233,7 @@ start:
 @no_args:
 @error:
     lda #$FF
-    sta $6003
+    sta VIA_DDRA
     pla
     tay
     pla
