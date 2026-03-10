@@ -18,13 +18,12 @@ PATTERN_BUF_SIZE = 64
 ; Zero Page (Transient Safe Area $58-$5F)
 ; ---------------------------------------------------------------------------
 t_ptr_temp   = $58 ; 2 bytes
-t_handle     = $5A ; 1 byte
 t_bytes_read = $5B ; 1 byte (used as temp)
 t_cwd_ptr    = $5E ; 2 bytes (passed by shell)
 
 ; For strstr
 s_haystack = $58 ; Overlaps t_ptr_temp
-s_needle   = $5A ; Overlaps t_handle
+s_needle   = $5A ; Overlaps t_handle (safe now that handle is in BSS)
 s_h_ptr    = $5C ; Temp pointer for haystack
 s_n_ptr    = $5E ; Temp pointer for needle
 
@@ -44,6 +43,7 @@ pattern_buf:    .res PATTERN_BUF_SIZE
 line_idx:       .res 1
 read_idx:       .res 1
 read_len:       .res 1
+file_handle:    .res 1
 
 .segment "CODE"
 start:
@@ -54,6 +54,10 @@ start:
     pha
     tya
     pha
+
+    ; Sanitize CPU state
+    cld
+    sei
 
     ; Initialize variables
     lda #0
@@ -185,13 +189,15 @@ start:
     jsr read_byte
     cmp #STATUS_OK
     beq @open_ok
+    jsr read_byte ; consume len lo
+    jsr read_byte ; consume len hi
     jmp file_error
 
 @open_ok:
     jsr read_byte ; len lo
     jsr read_byte ; len hi
     jsr read_byte ; handle
-    sta t_handle
+    sta file_handle
     jsr read_byte ; size
     jsr read_byte
     jsr read_byte
@@ -207,7 +213,7 @@ start:
     jsr send_byte
     lda #3
     jsr send_byte
-    lda t_handle
+    lda file_handle
     jsr send_byte
     lda #<READ_CHUNK_SIZE
     jsr send_byte
@@ -217,7 +223,11 @@ start:
     sta VIA_DDRA
     jsr read_byte
     cmp #STATUS_OK
-    bne @close_file
+    beq @read_len_check
+    jsr read_byte ; consume len lo
+    jsr read_byte ; consume len hi
+    jmp @close_file
+@read_len_check:
     jsr read_byte
     sta read_len
     jsr read_byte ; len hi
@@ -277,7 +287,7 @@ start:
     jsr send_byte
     lda #1
     jsr send_byte
-    lda t_handle
+    lda file_handle
     jsr send_byte
     lda #$00
     sta VIA_DDRA
@@ -346,26 +356,29 @@ process_line:
 
 skip_word:
     ldy #0
-@skip_char:
+@skip_chars:
     lda (t_ptr_temp), y
-    beq @done
+    beq @sw_done
     cmp #' '
     beq @found_space
-    inc t_ptr_temp
-    bne @skip_char
-    inc t_ptr_temp+1
-    jmp @skip_char
+    iny
+    jmp @skip_chars
 @found_space:
 @skip_spaces:
+    iny
     lda (t_ptr_temp), y
-    beq @done
+    beq @sw_done
     cmp #' '
-    bne @done
-    inc t_ptr_temp
-    bne @skip_spaces
-    inc t_ptr_temp+1
+    bne @sw_done
     jmp @skip_spaces
-@done:
+@sw_done:
+    tya
+    clc
+    adc t_ptr_temp
+    sta t_ptr_temp
+    lda #0
+    adc t_ptr_temp+1
+    sta t_ptr_temp+1
     rts
 
 print_string:

@@ -1,0 +1,16 @@
+NAME
+  WOZMON - Woz Monitor (External)
+
+SYNOPSIS
+  WOZMON
+
+DESCRIPTION
+  Starts the classic Woz Monitor.
+  
+  Press Reset to return to shell.
+
+EXAMPLES
+  WOZMON
+
+SEE ALSO
+  EXIT

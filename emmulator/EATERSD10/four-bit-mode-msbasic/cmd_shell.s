@@ -372,8 +372,7 @@ dispatch_command:
     inx
     lda command_table, x
     sta str_ptr1+1
-    jsr call_handler_indirect
-    rts ; Return to shell_loop
+    jmp call_handler_indirect ; Tail-call optimization saves 1 byte
 
 ; ---------------------------------------------------------------------------
 ; try_external
@@ -655,12 +654,50 @@ do_dir:
     stx ARG_LEN
 
 @send_request:
+    ; --- PRE-CHECK: Get Listing Size ---
+    lda #CMD_FS_LIST_SIZE
+    sta CMD_ID
+    jsr pico_send_request
+    bcc @size_ok
+    jsr timeout_error
+    rts
+
+@size_ok:
+    lda LAST_STATUS
+    cmp #STATUS_OK
+    beq @check_len
+    ; If size check failed (e.g. dir not found), let standard error handling run
+    cmp #STATUS_NO_FILE
+    bne @dir_fail_generic
+    jsr print_file_not_found
+    rts
+@dir_fail_generic:
+    jmp print_command_failed
+
+@check_len:
+    ; Check if Size > 1024 (High Byte >= 4)
+    ; Size is in RESP_BUFF (Little Endian 32-bit)
+    lda RESP_BUFF+3
+    bne @too_big
+    lda RESP_BUFF+2
+    bne @too_big
+    lda RESP_BUFF+1
+    cmp #4
+    bcs @too_big
+
+    ; --- Size OK: Request Data ---
     lda #CMD_FS_LIST
     sta CMD_ID
     jsr pico_send_request
     bcc @dir_ok
-    jsr timeout_error
-    rts
+    
+@too_big:
+    ; Buffer Overflow would occur. Warn user and abort to save bus sync.
+    lda #<DIR_TIMEOUT_MSG
+    sta ptr_temp
+    lda #>DIR_TIMEOUT_MSG
+    sta ptr_temp+1
+    jmp print_string_crlf ; This will print the message and then RTS
 @dir_ok:
     lda LAST_STATUS
     cmp #STATUS_OK
@@ -1661,7 +1698,9 @@ common_transfer:
     ; Semantic check: is it a directory according to the filesystem?
     ; For the STAT check, ARG_BUFF already contains the new path
     ldx ptr_temp
-    stx ARG_LEN
+    inx
+    stx ARG_LEN             ; Set length INCLUDING null terminator
+    dex                     ; Restore X to original length for later logic
     lda #CMD_FS_STAT
     sta CMD_ID
     jsr pico_send_request
@@ -2285,6 +2324,10 @@ print_string:
 @done:
     rts
 
+print_string_crlf:
+    jsr print_string
+    jmp shell_crlf
+
 ; ---------------------------------------------------------------------------
 ; Helper: Print String Raw (No Paging) - Used for "More" prompt
 ; ---------------------------------------------------------------------------
@@ -2569,6 +2612,7 @@ hex_nibble: ; in: A, out: A=nibble, C=0 on success, C=1 on error
 ; DATA
 ; ===========================================================================
 
+DIR_TIMEOUT_MSG: .asciiz "DIR BUFFER FULL. Use CATALOG."
 
 
 ; --- Command Dispatch Table ---
@@ -2650,25 +2694,25 @@ MORE_MSG:        .asciiz "--More--"
 ERR_MSG:         .asciiz "TIMEOUT"
 UNK_MSG:         .asciiz "UNKNOWN"
 HELP_MSG:
-    .byte "BUILT-IN: CD CONNECT CP DEL DIR ECHO EXIT FORMAT HELP LOADMEM MKDIR MOUNT PING PWD MV RUN SAVEMEM TOUCH CAT", $0D, $0A
-    .byte "EXTERNAL: *See BIN/ or docs", 0
+    .byte "INT: CD CONNECT CP DEL DIR ECHO EXIT FORMAT HELP LOADMEM MKDIR MOUNT PING PWD MV RUN SAVEMEM TOUCH CAT", $0D, $0A
+    .byte "EXT: *See BIN/ or docs", 0
 NOT_MOUNTED_MSG: .asciiz "NO MOUNT"
-MOUNT_OK_MSG:    .asciiz "MEDIA MOUNTED"
+MOUNT_OK_MSG:    .asciiz "MOUNTED"
 CONNECT_OK_MSG: .asciiz "CONNECTED"
 MOUNT_FAIL_MSG:
 FORMAT_FAIL_MSG:
 COMMAND_FAILED_MSG: .asciiz "FAILED"
-FORMAT_OK_MSG:   .asciiz "FORMAT COMPLETE"
+FORMAT_OK_MSG:   .asciiz "DONE"
 FILE_NOT_FOUND_MSG: .asciiz "NOT FOUND"
-FILE_EXISTS_MSG:    .asciiz "FILE EXISTS"
-WAIT_MSG:           .asciiz "Please wait..."
+FILE_EXISTS_MSG:    .asciiz "EXISTS"
+WAIT_MSG:           .asciiz "Wait..."
 
 ; --- SAVEMEM Messages ---
 SAVING_MSG:         .asciiz "Saving..."
 SAVED_MSG:          .asciiz "Done"
-PARSE_ERROR_MSG:    .asciiz "Parse error"
-ARG_ERROR_MSG:      .asciiz "Argument error"
-RANGE_ERROR_MSG:    .asciiz "Invalid range"
+PARSE_ERROR_MSG:    .asciiz "Bad hex"
+ARG_ERROR_MSG:      .asciiz "Arg err"
+RANGE_ERROR_MSG:    .asciiz "Bad range"
 
 ; ---------------------------------------------------------------------------
 ; Local System Call Implementations

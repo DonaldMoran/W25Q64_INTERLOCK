@@ -1,0 +1,17 @@
+NAME
+  MV - Move or Rename file (Internal)
+
+SYNOPSIS
+  MV     [old] [new]
+  RENAME [old] [new]
+
+DESCRIPTION
+  Renames a file or moves it to a new
+  location.
+
+EXAMPLES
+  MV OLD.TXT NEW.TXT
+  RENAME /BIN/TEST.BIN /TEST.BIN
+
+SEE ALSO
+  CP, COPY

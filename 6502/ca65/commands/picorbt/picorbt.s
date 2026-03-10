@@ -35,6 +35,10 @@ start:
     tya
     pha
 
+    ; Sanitize CPU state
+    cld
+    sei
+
     ; Print "Rebooting..."
     lda #<msg_reboot
     sta t_str_ptr1

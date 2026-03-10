@@ -1,0 +1,18 @@
+NAME
+  WRITE - Text Editor (External)
+
+SYNOPSIS
+  WRITE [file]
+
+DESCRIPTION
+  A full-screen text editor.
+  Supports scrolling, search, and
+  basic file operations.
+  
+  Ctrl+X to exit.
+
+EXAMPLES
+  WRITE NOTES.TXT
+
+SEE ALSO
+  CAT, TYPE

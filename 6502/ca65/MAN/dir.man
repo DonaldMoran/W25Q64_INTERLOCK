@@ -1,0 +1,25 @@
+NAME
+  DIR - List directory contents (Internal)
+
+SYNOPSIS
+  DIR [path]
+  LS  [path]
+
+DESCRIPTION
+  Lists files and subdirectories in
+  the specified path. If no path is
+  given, lists current directory.
+
+EXAMPLES
+  DIR
+  DIR /BIN
+  LS /USR/SRC
+
+NOTES
+  DIR is a built-in shell command.
+  It uses a fixed 1KB buffer. For
+  very large directories that exceed
+  this buffer, use CATALOG.
+
+SEE ALSO
+  CATALOG, CD, PWD

@@ -1,0 +1,16 @@
+NAME
+  RLIST - Remote List (External)
+
+SYNOPSIS
+  RLIST [path]
+
+DESCRIPTION
+  Lists files on the remote file server
+  using a streaming protocol.
+
+EXAMPLES
+  RLIST /
+  RLIST /uploads
+
+SEE ALSO
+  GET, SETSERVER

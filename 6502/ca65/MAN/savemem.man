@@ -1,0 +1,17 @@
+NAME
+  SAVEMEM - Save Memory to File (Internal)
+
+SYNOPSIS
+  SAVEMEM [start] [end] [file]
+
+DESCRIPTION
+  Saves a range of 6502 memory to a
+  file on the filesystem.
+  
+  [start] and [end] are hex addresses.
+
+EXAMPLES
+  SAVEMEM 1000 2000 DUMP.BIN
+
+SEE ALSO
+  LOADMEM, HEX

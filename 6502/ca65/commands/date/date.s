@@ -42,6 +42,10 @@ start:
     tya
     pha
 
+    ; Sanitize CPU state
+    cld
+    sei
+
     ; Check for arguments
     ; The shell passes arguments in the input buffer, but transient programs
     ; don't have direct access to the shell's parsing logic.

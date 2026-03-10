@@ -1,0 +1,15 @@
+NAME
+  HELP - List Commands (Internal)
+
+SYNOPSIS
+  HELP
+
+DESCRIPTION
+  Lists all available internal commands
+  and aliases.
+
+EXAMPLES
+  HELP
+
+SEE ALSO
+  MAN

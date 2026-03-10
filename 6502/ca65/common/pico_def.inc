@@ -18,23 +18,26 @@ VIA_IER     = VIA_BASE + $0E
 ; ---------------------------------------------------------------------------
 ; Command IDs
 ; ---------------------------------------------------------------------------
+; --- SYSTEM COMMANDS (0x00 - 0x0F) ---
 CMD_SYS_PING    = $01
 CMD_SYS_VER     = $02
 CMD_SYS_STATUS  = $03
 CMD_SYS_SET_TIME = $04
 CMD_SYS_GET_TIME = $05
+CMD_TIMER_START = $06
+CMD_TIMER_STOP  = $07
 CMD_SYS_RESET   = $0F
-
+; --- FILESYSTEM COMMANDS (0x10 - 0x2F) - KEEP IN SYNC WITH cmd_defs.h ---
 CMD_FS_MOUNT    = $10
 CMD_FS_LIST     = $11
 CMD_FS_OPEN     = $12
 CMD_FS_READ     = $13
 CMD_FS_WRITE    = $14
 CMD_FS_FORMAT   = $15
-CMD_FS_REMOVE   = $16
-CMD_FS_RENAME   = $17
-CMD_FS_MKDIR    = $18
-CMD_FS_COPY     = $19
+CMD_FS_REMOVE   = $16  ; Aliases: DEL, RM
+CMD_FS_RENAME   = $17  ; Aliases: REN, MV
+CMD_FS_MKDIR    = $18  ; Aliases: MD
+CMD_FS_COPY     = $19  ; Aliases: COPY, CP
 CMD_FS_TOUCH    = $1A
 CMD_FS_APPEND   = $1B
 CMD_FS_CLOSE    = $1C
@@ -46,7 +49,12 @@ CMD_FS_SYNC     = $21
 CMD_FS_UNMOUNT  = $22
 CMD_FS_SAVEMEM  = $23
 CMD_FS_LOADMEM  = $24
-
+CMD_FS_REMOVE_RECURSIVE = $25
+CMD_FS_DELETE_CONTENTS  = $26
+CMD_FS_TREE     = $27
+CMD_FS_SPACE    = $28
+CMD_FS_LIST_SIZE = $29
+; --- NETWORK COMMANDS (0x30 - 0x4F) ---
 CMD_NET_STATUS  = $30
 CMD_NET_CONNECT    = $31
 CMD_NET_GET_IP     = $32
@@ -55,6 +63,9 @@ CMD_NET_HTTP_GET   = $34
 CMD_NET_HTTP_POST  = $35
 CMD_NET_TIME       = $36
 CMD_DOWNLOAD_SIMPLE = $37
+CMD_NET_NEWS       = $38
+CMD_NET_WEATHER    = $39
+CMD_NET_RLIST      = $3A
 
 ; ---------------------------------------------------------------------------
 ; Status Codes

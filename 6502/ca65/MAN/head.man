@@ -1,0 +1,14 @@
+NAME
+  HEAD - Print Start of File (External)
+
+SYNOPSIS
+  HEAD [file]
+
+DESCRIPTION
+  Prints the first 10 lines of a file.
+
+EXAMPLES
+  HEAD LOG.TXT
+
+SEE ALSO
+  TAIL, CAT

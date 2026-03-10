@@ -3,9 +3,7 @@
 ;
 ; Workflow:
 ; 1. Read server.cfg to get IP:PORT
-; 2. Download remote listing to /RLIST.TMP using CMD_NET_HTTP_GET
-; 3. Display /RLIST.TMP using streaming (like TYPE)
-; 4. Delete /RLIST.TMP
+; 2. Stream remote listing using CMD_NET_RLIST
 
 .include "../../common/pico_def.inc"
 
@@ -22,7 +20,7 @@ ACIA_DATA    = $5000
 ; Zero Page (Transient Safe Area $58-$5F)
 ; ---------------------------------------------------------------------------
 t_ptr_temp   = $58 ; 2 bytes
-t_count      = $5A ; 2 bytes for length
+t_len_cnt    = $5A ; 2 bytes for length
 t_line_cnt   = $5C ; 1 byte for paging
 t_cfg_ptr    = $5E ; 2 bytes for config parsing
 
@@ -129,8 +127,8 @@ start:
     stx t_cfg_ptr       ; Save index of Port string start (low byte is enough for small buffer)
 
     ; -----------------------------------------------------------------------
-    ; 3. Construct CMD_NET_HTTP_GET Arguments
-    ; Format: IP\0PORT\0REMOTE_PATH\0LOCAL_PATH\0
+    ; 3. Construct CMD_NET_RLIST Arguments
+    ; Format: IP\0PORT\0REMOTE_PATH\0
     ; -----------------------------------------------------------------------
     ldx #0 ; ARG_BUFF index
 
@@ -197,19 +195,6 @@ start:
     sta ARG_BUFF, x
     inx
 
-    ; Copy Local Temp Path
-    ldy #0
-@copy_local_path:
-    lda str_tmp_file, y
-    beq @local_path_done
-    sta ARG_BUFF, x
-    inx
-    iny
-    jmp @copy_local_path
-@local_path_done:
-    lda #0
-    sta ARG_BUFF, x
-    inx
     stx ARG_LEN
 
     ; -----------------------------------------------------------------------
@@ -221,103 +206,80 @@ start:
     sta t_ptr_temp+1
     jsr print_string
 
-    lda #CMD_NET_HTTP_GET
-    sta CMD_ID
-    jsr pico_send_request
-    
-    lda LAST_STATUS
-    cmp #STATUS_OK
-    beq @download_ok
-    
-    lda #<msg_fail
-    sta t_ptr_temp
-    lda #>msg_fail
-    sta t_ptr_temp+1
-    jsr print_string_crlf
-    jmp done
-
-@download_ok:
-    ; -----------------------------------------------------------------------
-    ; 5. Display File (Streaming)
-    ; -----------------------------------------------------------------------
-    jsr CRLF
-    
-    ; Setup ARG_BUFF with temp filename for LOADMEM
-    ldx #0
-@setup_read_arg:
-    lda str_tmp_file, x
-    sta ARG_BUFF, x
-    beq @read_arg_done
-    inx
-    jmp @setup_read_arg
-@read_arg_done:
-    stx ARG_LEN
-
-    ; Manual send for streaming (to handle >1KB and avoid buffering)
+    ; Manual send for streaming
     lda #$FF
     sta VIA_DDRA
 
-    lda #CMD_FS_LOADMEM
+    lda #CMD_NET_RLIST
     jsr send_byte
     
     lda ARG_LEN
     jsr send_byte
 
     ldx #0
-@send_args_loop:
+@send_args:
     cpx ARG_LEN
-    beq @send_args_done
+    beq @args_done
     lda ARG_BUFF, x
     jsr send_byte
     inx
-    jmp @send_args_loop
-@send_args_done:
+    jmp @send_args
+@args_done:
 
     ; Switch to input
     lda #$00
     sta VIA_DDRA
 
+    ; Wait for initial response from Pico (Status + 2 bytes Len)
     jsr read_byte   ; Status
-    cmp #STATUS_OK
-    bne @display_fail
+    pha             ; Save status
+    jsr read_byte   ; consume len_lo
+    jsr read_byte   ; consume len_hi
+    pla             ; Restore status
+    cmp #$00        ; STATUS_OK
+    bne @error
 
-    ; Read Length
-    lda #$00
-    sta VIA_DDRA
+    jsr CRLF
+
+@read_frame_len:
     jsr read_byte
-    sta t_count
+    sta t_len_cnt
     jsr read_byte
-    sta t_count+1
+    sta t_len_cnt+1
 
-@stream_loop:
-    lda t_count
-    ora t_count+1
-    beq @stream_done
+    lda t_len_cnt
+    ora t_len_cnt+1
+    beq done
 
+@read_frame_data:
     jsr read_byte
     jsr paging_outch
 
-    lda t_count
-    bne @dec_stream
-    dec t_count+1
-@dec_stream:
-    dec t_count
-    jmp @stream_loop
+    sec
+    lda t_len_cnt
+    sbc #1
+    sta t_len_cnt
+    lda t_len_cnt+1
+    sbc #0
+    sta t_len_cnt+1
 
-@stream_done:
+    lda t_len_cnt
+    ora t_len_cnt+1
+    bne @read_frame_data
+
+    jmp @read_frame_len
+
+@error:
+    lda #<msg_fail
+    sta t_ptr_temp
+    lda #>msg_fail
+    sta t_ptr_temp+1
+    jsr print_string_crlf
+
+done:
     lda #$FF
     sta VIA_DDRA
 
-@display_fail:
-    ; -----------------------------------------------------------------------
-    ; 6. Cleanup (Delete Temp File)
-    ; -----------------------------------------------------------------------
-    ; ARG_BUFF already has str_tmp_file from step 5
-    lda #CMD_FS_REMOVE
-    sta CMD_ID
-    jsr pico_send_request
-
-done:
     ; Restore registers
     pla
     tay
@@ -341,37 +303,44 @@ bad_cfg_format:
 ; ---------------------------------------------------------------------------
 skip_word:
     ldy #0
-@skip_char:
+@skip_chars:
     lda (t_ptr_temp), y
-    beq @done
+    beq @sw_done
     cmp #' '
     beq @found_space
-    inc t_ptr_temp
-    bne @skip_char
-    inc t_ptr_temp+1
-    jmp @skip_char
+    iny
+    jmp @skip_chars
 @found_space:
 @skip_spaces:
+    iny
     lda (t_ptr_temp), y
-    beq @done
+    beq @sw_done
     cmp #' '
-    bne @done
-    inc t_ptr_temp
-    bne @skip_spaces
-    inc t_ptr_temp+1
+    bne @sw_done
     jmp @skip_spaces
-@done:
+@sw_done:
+    tya
+    clc
+    adc t_ptr_temp
+    sta t_ptr_temp
+    lda #0
+    adc t_ptr_temp+1
+    sta t_ptr_temp+1
     rts
 
 print_string:
+    pha
+    phy
     ldy #0
 @loop:
     lda (t_ptr_temp), y
-    beq @done
+    beq @ps_done
     jsr OUTCH
     iny
     jmp @loop
-@done:
+@ps_done:
+    ply
+    pla
     rts
 
 print_string_crlf:
@@ -412,7 +381,6 @@ check_paging:
 
 .segment "RODATA"
 str_server_cfg:  .asciiz "server.cfg"
-str_tmp_file:    .asciiz "/RLIST.TMP"
 msg_no_server:   .asciiz "Error: server.cfg not found. Use SETSERVER first."
 msg_bad_cfg:     .asciiz "Error: Invalid server.cfg format."
 msg_downloading: .asciiz "Fetching list..."

@@ -18,12 +18,12 @@ READ_CHUNK_SIZE = 128
 ; ---------------------------------------------------------------------------
 t_ptr_temp   = $58 ; 2 bytes
 t_handle     = $5A ; 1 byte
-t_bytes_read = $5B ; 1 byte (temp for chunk loop)
-t_in_word    = $5C ; 1 byte (boolean flag)
-t_cwd_ptr    = $5E ; 2 bytes (passed by shell, reused)
+t_bytes_read = $5B ; 1 byte
+t_in_word    = $5C ; 1 byte
+t_cwd_ptr    = $5E ; 2 bytes (passed by shell)
 
-; Counters (stored in BSS to save ZP space, we only need ZP for math ops temporarily)
-; We will use t_ptr_temp area for 32-bit math operations when needed
+; Overlapping ZP for printing at the end
+t_val32      = $5C ; 4 bytes ($5C-$5F), overlaps t_in_word, t_cwd_ptr
 
 ; ---------------------------------------------------------------------------
 ; System calls
@@ -50,6 +50,10 @@ start:
     pha
     tya
     pha
+
+    ; Sanitize CPU state
+    cld
+    sei
 
     ; Initialize counters
     lda #0
@@ -417,83 +421,116 @@ done:
 ; ---------------------------------------------------------------------------
 ; Helpers
 ; ---------------------------------------------------------------------------
+
 skip_word:
     ldy #0
-@skip_char:
+@skip_chars:
     lda (t_ptr_temp), y
-    beq @done
+    beq @sw_done
     cmp #' '
     beq @found_space
-    inc t_ptr_temp
-    bne @skip_char
-    inc t_ptr_temp+1
-    jmp @skip_char
+    iny
+    jmp @skip_chars
 @found_space:
 @skip_spaces:
+    iny
     lda (t_ptr_temp), y
-    beq @done
+    beq @sw_done
     cmp #' '
-    bne @done
-    inc t_ptr_temp
-    bne @skip_spaces
-    inc t_ptr_temp+1
+    bne @sw_done
     jmp @skip_spaces
-@done:
+@sw_done:
+    tya
+    clc
+    adc t_ptr_temp
+    sta t_ptr_temp
+    lda #0
+    adc t_ptr_temp+1
+    sta t_ptr_temp+1
     rts
 
 print_string:
+    pha
+    phy
     ldy #0
 @loop:
     lda (t_ptr_temp), y
-    beq @done
+    beq @ps_done
     jsr OUTCH
     iny
     jmp @loop
-@done:
+@ps_done:
+    ply
+    pla
     rts
 
-; Print 32-bit number at address in A (A=low byte of address)
-; Uses t_ptr_temp as pointer to number
+; ---------------------------------------------------------------------------
+; Helper: Print 32-bit unsigned decimal.
+; In: A contains low byte of address of the 4-byte number.
+;     High byte is assumed to be >BSS segment start.
+; ---------------------------------------------------------------------------
 print_dec_32:
     sta t_ptr_temp
     lda #>count_lines ; High byte is same for all counters in BSS
     sta t_ptr_temp+1
-    
-    ; Simple recursive divide by 10 or subtraction loop?
-    ; For 32-bit, subtraction is slow.
-    ; Let's use a simple implementation that prints hex for now to save space/time,
-    ; or a basic decimal routine if needed.
-    ; Given the constraints, let's print HEX first to verify logic.
-    ; User asked for "Word Count", usually decimal.
-    ; Implementing full 32-bit decimal print is complex.
-    ; Let's do 16-bit decimal for now (assuming files < 64KB lines/words)
-    ; or just print Hex.
-    ; Let's stick to Hex for simplicity and robustness in this iteration.
-    
-    ldy #3
-@hex_loop:
-    lda (t_ptr_temp), y
-    jsr OUTHEX
-    dey
-    bpl @hex_loop
-    rts
 
-OUTHEX: ; Print byte in A as 2 hex digits
-    pha
-    lsr
-    lsr
-    lsr
-    lsr
-    jsr @nibble
-    pla
-    and #$0F
-@nibble:
+    ; Copy value from (t_ptr_temp) to t_val32
+    ldy #0
+    lda (t_ptr_temp),y
+    sta t_val32+0
+    iny
+    lda (t_ptr_temp),y
+    sta t_val32+1
+    iny
+    lda (t_ptr_temp),y
+    sta t_val32+2
+    iny
+    lda (t_ptr_temp), y
+    sta t_val32+3
+
+    ; Now print from t_val32 (adapted from df.s)
+    ldx #10 ; Max 10 digits for 32-bit
+@outer_loop:
+    ldy #32 ; 32 bits to divide
+    lda #0  ; Remainder
+@inner_loop:
+    asl t_val32+0
+    rol t_val32+1
+    rol t_val32+2
+    rol t_val32+3
+    rol a
     cmp #10
-    bcc @digit
-    adc #6
-@digit:
-    adc #'0'
-    jmp OUTCH
+    bcc @no_sub
+    sbc #10
+    inc t_val32+0 ; Set quotient bit
+@no_sub:
+    dey
+    bne @inner_loop
+    
+    pha ; Save digit
+    dex
+    bne @outer_loop
+
+    ; Print digits
+    ldx #10
+    ldy #0 ; Flag to skip leading zeros
+@print_loop:
+    pla
+    ora #$30
+    cmp #'0'
+    bne @not_zero
+    cpx #1 ; Is it the last digit?
+    beq @force_print
+    cpy #0 ; Is it a leading zero?
+    beq @skip_print ; Yes, skip
+@force_print:
+@not_zero:
+    ldy #1 ; Found a non-zero digit
+    jsr OUTCH
+@skip_print:
+    dex
+    bne @print_loop
+    rts
 
 .segment "RODATA"
 msg_usage: .asciiz "Usage: WC <filename>"

@@ -1,0 +1,17 @@
+NAME
+  NEWS - RSS Headlines (External)
+
+SYNOPSIS
+  NEWS [host] [port] [path]
+  NEWS SETDEFAULT [host] [port] [path]
+
+DESCRIPTION
+  Streams RSS headlines from a server.
+  Uses a streaming XML parser.
+
+EXAMPLES
+  NEWS
+  NEWS feeds.bbci.co.uk 80 /rss.xml
+
+SEE ALSO
+  WEATHER

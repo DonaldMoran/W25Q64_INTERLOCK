@@ -1,0 +1,15 @@
+NAME
+  GREP - Search File (External)
+
+SYNOPSIS
+  GREP [pattern] [file]
+
+DESCRIPTION
+  Searches for a text pattern in a file
+  and prints matching lines.
+
+EXAMPLES
+  GREP error LOG.TXT
+
+SEE ALSO
+  CAT

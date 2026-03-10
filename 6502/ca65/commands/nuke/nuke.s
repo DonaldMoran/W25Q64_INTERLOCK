@@ -15,6 +15,16 @@ CRLF  = $FED1
 
 .segment "CODE"
 start:
+    ; Standard Entry: Preserve registers and sanitize CPU state
+    php
+    pha
+    txa
+    pha
+    tya
+    pha
+    cld
+    sei
+
     ; Print "Nuking..."
     lda #<msg_nuke
     sta t_str_ptr1
@@ -47,7 +57,7 @@ start:
     lda #'!' ; Error
     jsr OUTCH
     jsr CRLF
-    rts
+    jmp done
 
 @success:
     lda #'O'
@@ -55,6 +65,16 @@ start:
     lda #'K'
     jsr OUTCH
     jsr CRLF
+
+done:
+    ; Standard Exit: Restore registers and return
+    pla
+    tay
+    pla
+    tax
+    pla
+    plp
+    clc
     rts
 
 print_string:

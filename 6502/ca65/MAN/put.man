@@ -1,0 +1,15 @@
+NAME
+  PUT - Upload File (External)
+
+SYNOPSIS
+  PUT [local] [remote]
+
+DESCRIPTION
+  Uploads a file to the configured
+  file server via HTTP.
+
+EXAMPLES
+  PUT data.log /uploads/data.log
+
+SEE ALSO
+  GET, SETSERVER

@@ -10,6 +10,10 @@ OUTCH          = $FFEF
 
 .segment "CODE"
 start:
+    ; Sanitize CPU state
+    cld
+    sei
+
     jsr clear_screen
     jmp KRUSADER_ENTRY
 
