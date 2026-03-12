@@ -54,6 +54,10 @@
 #define CMD_NET_WEATHER    0x39  // Args: [Location] (optional). Returns: Framed stream
 #define CMD_NET_RLIST      0x3A  // Args: [IP]\0[Port]\0[RemotePath]. Returns: Framed stream
 
+// --- FORTH Virtual Disk COMMANDS (0x50 - 0x5F) ---
+#define CMD_FORTH_READ_BLOCK    0x50 // Args: [BlockNum(2)]. Returns: Stream of 1024 bytes.
+#define CMD_FORTH_WRITE_BLOCK   0x51 // Args: [BlockNum(2)] followed by 1024 byte stream. Returns: Status.
+
 // --- STATUS CODES ---
 #define STATUS_OK       0x00
 #define STATUS_ERR      0xFF
