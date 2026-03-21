@@ -16,6 +16,8 @@ This project is purely educational and hobbyist in nature. It exists to celebrat
 
 **Don's DOS ("DDOS")** connects a 1970s 6502 processor to modern flash memory—exactly the sort of educational, non-commercial work that flourishes in an environment of creative freedom.
 
+Beyond the operating system, the platform is intentionally designed to be easily extensible through the creation of transient commands. This flexibility allows even major environments like **FIG-Forth** to be implemented as transient applications that load and execute directly from RAM, preserving their original architectural design. The system hosts a suite of powerful tools: faithful ports of **Microsoft BASIC** and the **Krusader** assembler (paired with **WozMon**), alongside new utilities like **WRITE** (a Nano-like text editor) and **CALC** (a programmer's calculator). All of these applications have been adapted to leverage the system's modern file I/O capabilities.
+
 ---
 
 ## 1. Overall Architecture
@@ -906,13 +908,21 @@ Maintains the future ideas section
 - **ROM Integration:** The shell has been moved to ROM at `$E000`, freeing up RAM for transient programs.
 - **Auto-Mount:** Filesystem now mounts automatically on boot.
 
-## Applications Section
+## Notable Applications & Filesystem Integration
 
-- This section highlights some of the key applications developed for the 6502 system.
+One of the defining features of this system is the deep integration between the 6502 and the Pico W's filesystem. Unlike typical retro-computer builds that rely on cassette interfaces or hex entry, this system provides modern **File I/O** to several key applications.
+
+The following applications have been ported or developed to utilize the DDOS filesystem API:
+
+- **DDOS (Don's DOS):** The command-line operating system. It provides Unix-like file management (`LS`, `CP`, `MV`, `RM`) alongside MS-DOS style aliases (`DIR`, `COPY`, `RENAME`, `DEL`), network commands (`GET`, `NEWS`), and launches all other applications.
+- **MSBASIC:** A port of Microsoft BASIC patched to support `SAVE` and `LOAD` commands, allowing basic programs to be stored directly on the LittleFS filesystem. This implementation is based on **Commodore BASIC 2 (CONFIG_2A)** derived from the mist64/msbasic repository.
+ *   **FIG-FORTH:** A faithful port of **FIG-Forth Release 1.1** (1980), preserving the classic **Indirect Threaded Code (ITC)** architecture popularized on the Apple II and C64. It features a **virtualized disk** that maps Forth's traditional "screens" (blocks) to individual 1KB files stored in the `/FORTH/` directory at the root of the flash disk (e.g., `/FORTH/001.FTH`), utilizing a RAM-based sector cache for performance.
+- **KRUSADER:** A resident symbolic assembler and disassembler. It has been extended with file I/O commands to Save Source (`S`) and Fetch Source (`F`), enabling self-hosted development.
+- **WOZMON:** The classic Apple 1 monitor, available as a fallback for low-level memory inspection and debugging.
 
 - **Text Editor (`WRITE`)**
 
-  - A new transient command `WRITE` has been implemented, providing a Nano-like text editing experience on the 6502 system.
+  - Authored by Don Moran, `WRITE` is a new transient command providing a Nano-like text editing experience on the 6502 system.
 
   - **Key Features:**
 
@@ -938,6 +948,8 @@ Maintains the future ideas section
     - Implements robust stack management to prevent corruption during execution.
 
 - **Retro Calculator Details (`CALC`)**
+
+  - Also authored by Don Moran.
 
   - **Features:**
     - Hex/Binary/Decimal conversions

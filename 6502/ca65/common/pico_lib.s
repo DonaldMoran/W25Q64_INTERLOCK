@@ -21,7 +21,7 @@ ARG_LEN:        .res 1
 ARG_BUFF:       .res 256
 LAST_STATUS:    .res 1
 RESP_LEN:       .res 2
-RESP_BUFF:      .res 1025 ; +1 for safety null terminator
+RESP_BUFF:      .res 1024
 TEMP_LEN:       .res 2
 
 .segment "CODE"
@@ -226,7 +226,4 @@ pico_read_bytes:
     ora TEMP_LEN+1
     bne @loop
 
-    ; Null-terminate the buffer for safety
-    lda #0
-    sta (pico_ptr), y
     rts

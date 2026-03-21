@@ -1,0 +1,500 @@
+fig-FORTH  1.0
+0 BLOCK
+: DUMP   ( addr n -- )  
+   0 DO  
+      DUP I + C@ 2 .R SPACE  
+   LOOP  
+   DROP ;
+HEX
+0 BLOCK 16 DUMP
+
+
+
+: DUMP   ( addr n -- )  
+   0 DO  
+      DUP I + C@ 2 .R SPACE  
+   LOOP  
+   DROP ;
+EMPTY-BUFFERS
+1 BLOCK
+HEX
+1 BLOCK 20 DUMP
+
+
+
+EMPTY-BUFFERS
+5 BLOCK
+: DUMP   ( addr n -- )  
+   0 DO  
+      DUP I + C@ 2 .R SPACE  
+   LOOP  
+   DROP ;
+HEX
+5 BLOCK 20 DUMP
+
+
+
+Let's debug step by step using ONLY words you have:
+
+Step 1: Check if FIRST is actually a variable
+
+forth
+HEX
+' FIRST .        ( should show an address, not 0 )
+
+
+
+forth            (Step 2: Check what's at FIRST's address)
+HEX
+FIRST @ .        ( this showed 0 before, let's check again )
+
+(Step 3: Let's manually set and check)
+
+forth
+HEX
+HERE .           ( see where dictionary ends )
+400 + .          ( see where we want buffers )
+DUP .            ( should show the same number )
+Step 4: Store it properly
+
+forth
+HEX
+HERE 400 +       ( calculate buffer start )
+DUP              ( duplicate for FIRST )
+FIRST !          ( store in FIRST )
+420 +            ( add buffer size )
+LIMIT !          ( store in LIMIT )
+Step 5: Verify with simple dot (not U.)
+
+forth
+FIRST @ .        ( should now show a non-zero number )
+LIMIT @ .        ( should show FIRST + 420 )
+If FIRST @ . still shows 0, then FIRST might not be a USER variable as expected. Let's check what FIRST actually is:
+
+forth
+' FIRST .        ( see its address )
+@ .              ( see what's stored there )
+Tell me what each of these shows and we'll figure out exactly how to fix your buffer pointers.
+
+
+HEX
+213F 400 + 253F DUP 3F80 10 + ! 3F80 12 + !
+253F USE ! 253F PREV !
+
+
+Let's put buffers at a safe distance, maybe at $3000:
+
+forth
+HEX
+3000 DUP FIRST !          ( set FIRST to $3000 )
+420 + LIMIT !             ( set LIMIT to $3420 )
+3000 USE ! 3000 PREV !    ( init USE and PREV )
+
+
+HEX
+: BLOCK ( n -- addr )
+    OFFSET @ + >R
+    PREV @ DUP @ R - DUP +
+    IF
+        PREV @
+    ELSE
+        DROP
+        BEGIN
+            +BUF
+        0= UNTIL
+        DROP
+        R BUFFER
+        DUP R 1 R/W
+        2-
+    THEN
+    DUP PREV !
+    R> DROP
+    2+ ;
+    
+    
+    
+
+Once we see 64 bytes of AA and no crash, we’ll know the Forth side is mechanically correct 
+COLD
+: DUMP   ( addr n -- ) 
+   0 DO 
+      DUP I + C@ 2 .R SPACE 
+   LOOP 
+   DROP ;
+HEX
+EMPTY-BUFFERS
+1 BLOCK 40 DUMP
+
+
+
+
+; ============================================================
+;    - A DEBUG TEST
+; ============================================================
+L_RW:     .BYTE $83,"R/",$D7
+          .WORD L3696
+; RW  ( addr block# readflag -- ior )
+RW:       .WORD *+2
+
+          STY RW_SAVED_Y
+
+          ; Pop args
+          LDA 0,X        ; readflag
+          STA RW_FLAG
+          INX
+          INX
+
+          LDA 0,X        ; block low
+          STA RW_BLOCK
+          LDA 1,X        ; block high
+          STA RW_BLOCK+1
+          INX
+          INX
+
+          LDA 0,X        ; addr low
+          STA RW_BUF
+          LDA 1,X        ; addr high
+          STA RW_BUF+1
+          INX
+          INX
+
+          ; Ignore flag, just fill buffer with a pattern
+          LDA RW_BUF
+          STA RW_PTR
+          LDA RW_BUF+1
+          STA RW_PTR+1
+
+          LDA #4
+          STA RW_PAGE_COUNT
+
+@page:
+          LDY #0
+@byte:
+          LDA #$AA       ; recognizable pattern
+          STA (RW_PTR),Y
+          INY
+          BNE @byte
+
+          INC RW_PTR+1
+          DEC RW_PAGE_COUNT
+          BNE @page
+
+          ; Push ior = 0
+          LDA #0
+          DEX
+          DEX
+          STA 0,X
+
+          LDY RW_SAVED_Y
+          JMP NEXT
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fig-FORTH  1.0
+
+########################################################################
+# So for FLUSH to work:
+#
+# UPDATE must correctly mark the buffer dirty
+#
+# FLUSH must correctly find that buffer
+#
+# R/W must correctly write 1024 bytes
+#
+# R/W must return with no net stack effect
+#
+# The interpreter must continue cleanly after each write
+#
+# If any of these steps is wrong, FLUSH will hang or crash.
+########################################################################
+
+1 BLOCK
+: DUMP   ( addr n -- ) 
+   0 DO 
+      DUP I + C@ 2 .R SPACE 
+   LOOP 
+   DROP ;
+HEX
+UPDATE
+FLUSH
+1 BLOCK 4 - 4 DUMP
+
+
+
+
+HEX
+1 BLOCK
+UPDATE
+FLUSH
+1 BLOCK
+
+
+
+HEX
+1 BLOCK
+UPDATE
+FLUSH
+1 BLOCK 4 - 4 DUMP
+
+
+
+
+1 BLOCK
+: DUMP   ( addr n -- ) 
+   0 DO 
+      DUP I + C@ 2 .R SPACE 
+   LOOP 
+   DROP ;
+UPDATE
+1 BLOCK 4 DUMP
+
+1 BLOCK
+: DUMP   ( addr n -- ) 
+   0 DO 
+      DUP I + C@ 2 .R SPACE 
+   LOOP 
+   DROP ;
+UPDATE
+FLUSH
+1 BLOCK 4 - 4 DUMP
+
+
+
+
+
+
+
+
+
+
+
+HEX
+1 BLOCK
+: TEST ." OK" ;
+UPDATE
+FLUSH
+
+: TEST ." OK" ;
+
+1 LOAD
+TEST
+
+
+HEX
+1 BLOCK 40 DUMP
+
+HEX
+1 BLOCK 1024 20 FILL  UPDATE  FLUSH
+1 BLOCK 40 DUMP
+
+
+1 BLOCK
+: TEST ." OK" ;
+UPDATE
+FLUSH
+1 LOAD
+TEST
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+COLD
+HEX
+EMPTY-BUFFERS
+: DUMP   ( addr n -- ) 
+   0 DO 
+      DUP I + C@ 2 .R SPACE 
+   LOOP 
+   DROP ; 
+1 LOAD
+
+
+1 BLOCK 40 DUMP 
+
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+HEX
+0 BLOCK
+0 0 C!
+1 1 C!
+2 2 C!
+3 3 C!
+UPDATE
+FLUSH
+EMPTY-BUFFERS
+1 BLOCK DROP 
+A-9E X-9A Y-00 S-F5 P-B4 NBI
+4351   00          BRK 
+
+1 load is still odd:
+fig-FORTH  1.0
+1 load B;B;   ? MSG # 0
+
+
+
+
+
+0 BLOCK
+0 0 C!
+1 1 C!
+2 2 C!
+3 3 C!
+0 BLOCK 0 C@ . 1 C@ . 2 C@ . 3 C@ . 
+UPDATE OK
+FLUSH OK
+
+HEX OK
+0 BLOCK OK
+0 0 C!  1 1 C!  2 2 C!  3 3 C! OK
+UPDATE OK
+FLUSH OK
+035B C@ . 0 OK
+
+AND IN MY PICO BRIDGE LOG WHICH HOST THE FLASH CHIP I SEE:
+
+CMD: 0x51, Len: 2
+FORTH_WRITE: Block 0, Offset 0x00000000
+FORTH_WRITE: Sending response...
+FORTH_WRITE: Response sent
+
+
+
+
+
+
+
+
+
+
+
+EMPTY-BUFFERS
+5 BLOCK 0 C@ .
+
+
+HEX
+0 35B C!
+35B C@ .
+EMPTY-BUFFERS
+5 BLOCK 0 C@ .
+35B C@ .
+
+
+; Write HI to a block
+SP@ .
+1 BLOCK
+1024 0 FILL
+1 BLOCK 0 65 C!
+1 BLOCK 1 66 C!
+UPDATE
+EMPTY-BUFFERS
+1 BLOCK
+0 C@ .
+1 C@ .
+
+
+
+SP@ .
+0 BLOCK
+1024 0 FILL
+0 BLOCK 0 65 C!
+0 BLOCK 1 66 C!
+UPDATE
+EMPTY-BUFFERS
+0 BLOCK
+0 C@ .
+1 C@ .
+
+
+TRY THIS ONE:
+1 BLOCK
+1024 0 FILL
+1 BLOCK 0 65 C!
+1 BLOCK 1 66 C!
+EMPTY-BUFFERS
+1 BLOCK
+0 C@ .
+1 C@ .
+HEX
+35B C@ .
+DECIMAL
+
+
+
+
+
+   
+
+
+
+
+
+
+
+
+    ldy ARG_LEN
+    beq @skip_args
+    ldx #0
+@arg_loop:
+    lda ARG_BUFF, x
+    jsr send_byte
+    inx
+    dey
+    bne @arg_loop
+@skip_args:

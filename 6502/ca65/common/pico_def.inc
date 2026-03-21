@@ -67,6 +67,10 @@ CMD_NET_NEWS       = $38
 CMD_NET_WEATHER    = $39
 CMD_NET_RLIST      = $3A
 
+; --- FORTH Virtual Disk COMMANDS (0x50 - 0x5F) ---
+CMD_FORTH_READ_BLOCK    = $50
+CMD_FORTH_WRITE_BLOCK   = $51
+
 ; ---------------------------------------------------------------------------
 ; Status Codes
 ; ---------------------------------------------------------------------------

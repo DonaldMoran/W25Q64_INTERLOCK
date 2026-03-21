@@ -10,6 +10,7 @@
 6502/ca65/commands/df/df.s
 6502/ca65/commands/diff/diff.s
 6502/ca65/commands/do/do.s
+6502/ca65/commands/figforth/figforth.s
 6502/ca65/commands/get/get.s
 6502/ca65/commands/grep/grep.s
 6502/ca65/commands/head/head.s
