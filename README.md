@@ -123,6 +123,7 @@ The 65C02 computer issues commands, which are transmitted through the 6522 VIA t
 | `BASIC` | | Start MSBASIC (External). Displays a "Don's DOS BASIC" splash screen. |
 | `BASICW` | | Warm start MSBASIC (External) |
 | `KRUSADER` | | Start Krusader Assembler (External) |
+| `FIGFORTH` | | Start FIG-Forth 1.1 Environment (External) |
 | `KRUSADERW` | | Warm start Krusader (External) |
 | `WOZMON` | | Start WozMon Monitor (External) |
 | `HEAD [FILE]` | | Print first 10 lines of file (External) |
@@ -916,7 +917,9 @@ The following applications have been ported or developed to utilize the DDOS fil
 
 - **DDOS (Don's DOS):** The command-line operating system. It provides Unix-like file management (`LS`, `CP`, `MV`, `RM`) alongside MS-DOS style aliases (`DIR`, `COPY`, `RENAME`, `DEL`), network commands (`GET`, `NEWS`), and launches all other applications.
 - **MSBASIC:** A port of Microsoft BASIC patched to support `SAVE` and `LOAD` commands, allowing basic programs to be stored directly on the LittleFS filesystem. This implementation is based on **Commodore BASIC 2 (CONFIG_2A)** derived from the mist64/msbasic repository.
- *   **FIG-FORTH:** A faithful port of **FIG-Forth Release 1.1** (1980), preserving the classic **Indirect Threaded Code (ITC)** architecture popularized on the Apple II and C64. It features a **virtualized disk** that maps Forth's traditional "screens" (blocks) to individual 1KB files stored in the `/FORTH/` directory at the root of the flash disk (e.g., `/FORTH/001.FTH`), utilizing a RAM-based sector cache for performance.
+
+- **FIG-FORTH:** A faithful port of **FIG-Forth Release 1.1** (1980), preserving the classic **Indirect Threaded Code (ITC)** architecture popularized on the Apple II and C64. It features a **virtualized disk** that maps Forth's traditional "screens" (blocks) to individual 1KB files stored in the `/FORTH/` directory at the root of the flash disk (e.g., `/FORTH/001.FTH`), utilizing a RAM-based sector cache for performance.
+
 - **KRUSADER:** A resident symbolic assembler and disassembler. It has been extended with file I/O commands to Save Source (`S`) and Fetch Source (`F`), enabling self-hosted development.
 - **WOZMON:** The classic Apple 1 monitor, available as a fallback for low-level memory inspection and debugging.
 
