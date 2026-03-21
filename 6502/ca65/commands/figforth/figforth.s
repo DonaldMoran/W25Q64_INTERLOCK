@@ -1,6 +1,3 @@
-.include "common/pico_def.inc"
-.import pico_send_request, send_byte, read_byte, pico_init
-.import CMD_ID, ARG_LEN, ARG_BUFF, LAST_STATUS, RESP_LEN, RESP_BUFF
 ;
 ;                        Through the courtesy of
 ;
@@ -24,16 +21,62 @@
 ;    Translated from the FIG model by W.F. Ragsdale with input-
 ;    output given for the Rockwell System-65. Transportation to
 ;    other systems requires only the alteration of :
-;                 XEMIT, XKEY, XQTER, XCR, AND RSLW
+;                 XEMIT, XKEY, XQTER, XCR, AND RSLW 
+;
+; # ####################################################################
+; # Don Moran. Document the purpose of each of these words
+; # Word  Purpose	                      Your implementation should do
+; # ----- ------------------------------  ------------------------------
+; # XEMIT Output one character            Call Pico send‑byte routine
+; # XKEY  Input one character             Call Pico read‑byte routine
+; # XQTER Query terminal ready?           Return "key available?"
+; # XCR   Carriage return                 Just emit CR + LF via XEMIT
+; # RSLW  Read/Write one 1024‑byte block  Call block protocol
+;
+; # Word    A           X              Y            Notes
+; # XEMIT   modified    must restore    modified    pops 1 byte
+; # XKEY    modified    must restore    modified    pushes 1 byte
+; # XQTER   modified    must restore    modified    pushes 0/1
+; # XCR	    modified    must restore    modified    calls XEMIT twice
+; # RSLW    modified    must restore    modified    pops 3 items
+; # ####################################################################
+.include "common/pico_def.inc"
+;         Pico 6502 specific's
+;
+RWFLAG    =$F0           ; Pico 6502 RSLW support
+ADDR      =$F1           ; Pico 6502 RSLW support
+PTR       =$F3           ; Pico 6502 RSLW support
+PAGECNT   =$F5           ; Pico 6502 RSLW support 
+YSAVE     =$F6      
+DDOS      =$E000         ; Pico 6502 DOS Shell
+ACIA_DATA =$5000         ; Pico 6502 serial port / i.e. ACIA_DATA
+
+; --- Pico Interface Constants & Variables (Embedded) ---
+ARG_BUFF    = $0200     ; Page 2
+CMD_ID      = $0360     ; Page 3
+ARG_LEN     = $0361
+LAST_STATUS = $0362
+RESP_LEN    = $0363
+TEMP_LEN    = $0365
+RESP_BUFF   = $0400     ; 1K Buffer ($0400-$07FF)
+
+; VIA Constants
+PCR_CA2_LOW  = $CC
+PCR_CA2_HIGH = $CE
+IFR_CA1_BIT  = $02
+
+; --- Forth Block Cache & Pico Driver ZP ---
+; Grouped together from $EA-$EF for easier debugging. This block is safely
+; located between FIG-Forth's internal variables (ending ~$B0) and the
+; RSLW variables (starting at $F0).
+pico_ptr    = $EA       ; 2-byte ZP pointer for pico_read_bytes
+CACHE_BLK   = $EC       ; 2-byte ZP: Block number currently in cache
+CACHE_DIRTY = $EE       ; 1-byte ZP: Dirty flag (0=clean, 1=dirty)
+CACHE_VALID = $EF       ; 1-byte ZP: Valid flag (0=invalid, 1=valid)
+CACHE_BUF   = RESP_BUFF
 ;
 ;    Equates giving memory assignments, machine
 ;    registers, and disk parameters.
-;
-
-.segment "HEADER"
-    .word $0800
-.segment "CODE"
-
 ;
 SSIZE     =128           ; sector size in bytes
 NBUF      =8             ; number of buffers desired in RAM
@@ -52,13 +95,6 @@ IP        =N+8           ; interpretive pointer.
 W         =IP+3          ; code field pointer.
 UP        =W+2           ; user area pointer.
 XSAVE     =UP+2          ; temporary for X register.
-; Custom ZP variables for R/W word (placed in a known-free area)
-RW_ADDR       = $B8 ; 2 bytes, target memory address for R/W
-RW_BLOCK      = $BA ; 2 bytes, block number for R/W
-RW_FLAG       = $BC ; 1 byte, read/write flag for R/W
-RW_PAGE_COUNT = $BD ; 1 byte, page counter for 4x256 loops
-RW_SRC_PTR    = $BE ; 2 bytes, source pointer for memory copy
-
 ;
 TIBX      =$0300         ; terminal input buffer of 84 bytes.
 ORIG      =$0800         ; origin of FORTH's Dictionary.
@@ -66,15 +102,7 @@ MEM       =$4000         ; top of assigned memory+1 byte.
 UAREA     =MEM-128       ; 128 bytes of user area
 DAREA     =UAREA-BMAG    ; disk buffer space.
 ;
-;         Monitor calls for terminal support
-;OUTCH    =$BF2D         ; output one ASCII char. to term. OSI ROM Routine (screen)
-;OUTCH    =$FCB1         ; output one ASCII char. to term. OSI ROM Routine (serial port)
-;INCH     =$FD00         ; input one ASCII char. to term.  OSI ROM Routine (keyboard)
-;INCH     =$FE80         ; input one ASCII char. to term.  OSI ROM Routine (serial port)
-OUTCH     =LECHO         ; Local Echo
-INCH      =LCHARIN       ; LOCAL CHAR IN
-;TCR      =$D0F1         ; terminal return and line feed. See end of listing.
-ACIA_DATA =$5000
+;
 ;
 ;    From DAREA downward to the top of the dictionary is free
 ;    space where the user's applications are compiled.
@@ -83,6 +111,10 @@ ACIA_DATA =$5000
 ;    to Boot up code, and parameters describing the system.
 ;
 ;
+;          .org ORIG
+.segment "HEADER"
+    .word $0800
+.segment "CODE"
 ;
                          ; User cold entry point
 ENTER:    NOP            ; Vector to COLD entry
@@ -2973,6 +3005,7 @@ L2705:    .BYTE $85,"FLUS",$C8
 L2835:    .WORD LIT,$7FFF,BUFFR
           .WORD DROP,PLOOP
 L2839:    .WORD $FFF6    ; L2835-L2839
+          .WORD DO_COMMIT ; Pico: Commit cached writes to disk at end of FLUSH
           .WORD SEMIS
 ;
 ;                                       EMPTY-BUFFERS
@@ -3233,45 +3266,392 @@ XKEY:     STX XSAVE
 ;         XQTER leaves a boolean representing terminal break
 ;
 ;
-XQTER:    LDA $C000      ; system depend port test
-          CMP $C001
-          AND #1
-          JMP PUSHOA
+XQTER:
+    LDA $5001        ; ACIA status
+    AND #$01         ; mask RDRF (bit 0)
+    JMP PUSHOA       ; push 0 or 1
 ;
 ;         XCR displays a CR and LF to terminal
 ;
 ;
 XCR:      STX XSAVE
+          LDA INIT_FLAG
+          BNE @skip
+          JSR FULL_INIT
+@skip:
           JSR TCR        ; use monitor call
           LDX XSAVE
           JMP NEXT
+          
+          
 ;
-;                                       -DISC
-;                                       machine level sector R/W
+;  DDISC — TEST VERSION FOR YOUR SYSTEM
+;  Writes 1024 bytes of $AA into the FIG-Forth block buffer.
 ;
+;  REVISED: Uses PTR for math to avoid clobbering CACHE_BLK tag.
+;
+
 L3030:    .BYTE $85,"-DIS",$C3
-          .WORD L2924    ; link to -->
-DDISC:    .WORD *+2
-          LDA 0,X
-          STA $C60C
-          STA $C60D      ; store sector number
-          LDA 2,X
-          STA $C60A
-          STA $C60B      ; store track number
-          LDA 4,X
-          STA $C4CD
-          STA $C4CE      ; store drive number
-          STX XSAVE
-          LDA $C4DA      ; sense read or write
-          BNE L3032
-          JSR $E1FE
-          JMP L3040
-L3032:    JSR $E262
-L3040:    JSR $E3EF      ; head up motor off
-          LDX XSAVE
-          LDA $C4E1      ; report error code
-          STA 4,X
-          JMP POPTWO
+          .WORD L2924
+
+DDISC:    .WORD DDISC_CODE
+
+; --- Custom word to force flush of cache to Pico ---
+DO_COMMIT:
+        .WORD *+2
+        LDA CACHE_DIRTY
+        BEQ @skip
+        JSR DDISC_FLUSH_CACHE
+@skip:  JMP NEXT
+
+DDISC_CODE:
+        ; ---------------------------------------------------------
+        ; PHASE 2: Address Calculation
+        ; Inputs on Data Stack (indexed by X):
+        ;   0,X = Sector (BCD, 1-based)
+        ;   2,X = Track  (BCD, 0-based)
+        ;   4,X = Drive  (BCD, 1-based)
+        ;   6,X = Buffer Address
+        ; ---------------------------------------------------------
+
+        ; 1. Calculate Drive Offset: (Drive-1) * 800
+        LDA 4,X         ; Drive
+        SEC
+        SBC #1          ; Drive-1 (0 or 1)
+        BEQ @drive0
+        ; Drive 1: Base = 800 ($0320)
+        lda #$20
+        sta PTR
+        lda #$03
+        sta PTR+1
+        JMP @do_track
+@drive0:
+        ; Drive 0: Base = 0
+        lda #0
+        sta PTR
+        sta PTR+1
+
+@do_track:
+        ; 2. Calculate Track Offset: Track * 18
+        lda 2,X         ; Track (BCD)
+        JSR BCD_TO_BIN
+        sta pico_ptr    ; Track (Low) - save in pico_ptr temporarily
+        lda #0
+        sta pico_ptr+1
+
+        ; Calculate Track * 18 = (Track * 16) + (Track * 2)
+        ; first, calc Track * 2
+        lda pico_ptr
+        ASL A
+        sta ARG_LEN     ; reuse ARG_LEN as temp low
+        lda pico_ptr+1
+        rol a
+        sta ARG_LEN+1   ; reuse ARG_LEN+1 (LAST_STATUS) as temp high (Track * 2)
+
+        ; now calc Track * 16 (Shift PTR left 4 times)
+        asl pico_ptr
+        rol pico_ptr+1
+        asl pico_ptr
+        rol pico_ptr+1
+        asl pico_ptr
+        rol pico_ptr+1
+        asl pico_ptr
+        rol pico_ptr+1
+
+        ; Add (Track*16) + (Track*2)
+        CLC
+        lda pico_ptr
+        adc ARG_LEN
+        sta pico_ptr
+        lda pico_ptr+1
+        adc ARG_LEN+1
+        sta pico_ptr+1  ; pico_ptr now holds Track * 18
+
+        ; Add to Base
+        CLC
+        lda PTR
+        adc pico_ptr
+        sta PTR
+        lda PTR+1
+        adc pico_ptr+1
+        sta PTR+1
+
+        ; 3. Add Sector Offset: (Sector-1)
+        lda 0,X         ; Sector (BCD)
+        JSR BCD_TO_BIN
+        SEC
+        SBC #1          ; Make 0-based
+        CLC
+        adc PTR
+        sta PTR
+        BCC @calc_done
+        inc PTR+1
+
+@calc_done:
+        ; PTR now holds the Linear Sector Index (128-byte units)
+        
+        ; 4. Convert to 1K Block Number and Sub-Sector Index
+        ; Block#    = Linear / 8
+        ; SubSector = Linear % 8
+        
+        lda PTR
+        AND #$07
+        STA pico_ptr    ; Save Sub-Sector Index (0-7) for later use
+
+        ; Divide PTR by 8 to get the 1K Block Number
+        lsr PTR+1
+        ror PTR
+        lsr PTR+1
+        ror PTR
+        lsr PTR+1
+        ror PTR
+        ; PTR now holds the REQUESTED 1K Block Number
+        
+        ; ---------------------------------------------------------
+        ; PHASE 4: Full Cache Logic (Read/Write/Flush)
+        ; PTR holds the requested 1K block number.
+        ; pico_ptr holds the sub-sector index (0-7).
+        ; ---------------------------------------------------------
+
+        ; 1. Is the requested block already in the cache?
+        lda CACHE_VALID
+        beq @cache_miss         ; Invalid -> Miss
+        lda PTR
+        cmp CACHE_BLK
+        bne @cache_miss
+        lda PTR+1
+        cmp CACHE_BLK+1
+        bne @cache_miss
+
+        jmp @block_is_ready     ; Hit!
+
+@cache_miss:
+        ; 2. Cache Miss. Do we need to flush the old block?
+        lda CACHE_VALID
+        beq @load_new_block     ; Nothing to flush
+        lda CACHE_DIRTY
+        beq @load_new_block     ; Clean, no need to flush
+
+        ; 3. FLUSH OLD BLOCK
+        ; CACHE_BLK holds the block number to write back
+        jsr DDISC_FLUSH_CACHE
+        lda 4,X                 ; Check error code
+        bne @exit_error
+
+@load_new_block:
+        ; 4. LOAD NEW BLOCK
+        ; PTR holds the new block number
+        jsr DDISC_LOAD_CACHE
+        lda 4,X                 ; Check error code
+        bne @exit_error
+
+@block_is_ready:
+        ; 5. Block is now in CACHE_BUF. Perform the requested R/W.
+        lda RWFLAG
+        bne @do_write
+
+        ; --- READ OPERATION ---
+        jsr DDISC_COPY_TO_USER
+        jmp @success
+
+@do_write:
+        ; --- WRITE OPERATION ---
+        jsr DDISC_COPY_FROM_USER
+        
+        ; Mark cache dirty
+        lda #1
+        sta CACHE_DIRTY
+
+        ; Pico: Write-back caching enabled.
+        ; We do NOT flush here. We wait for eviction or FLUSH (DO_COMMIT).
+        ; This aggregates the 8 sector writes of a FLUSH into 1 physical write.
+        ; jsr DDISC_FLUSH_CACHE
+        ; lda 4,X
+        ; bne @exit_error
+
+@success:
+        lda #0
+        sta 4,X
+@exit_error:
+        jmp POPTWO
+
+; ---------------------------------------------------------
+; SUBROUTINES
+; ---------------------------------------------------------
+
+DDISC_LOAD_CACHE:
+        ; Load block (PTR) into CACHE_BUF (RESP_BUFF)
+
+        ; Save sub-sector index, as pico_send_request will clobber pico_ptr
+        lda pico_ptr
+        pha
+        phx             ; Save X, pico_send_request clobbers it
+
+        lda #CMD_FORTH_READ_BLOCK
+        sta CMD_ID
+        lda #2
+        sta ARG_LEN
+        lda PTR
+        sta ARG_BUFF
+        lda PTR+1
+        sta ARG_BUFF+1
+
+        jsr pico_send_request
+
+        lda LAST_STATUS
+        beq @load_ok
+
+        ; Error
+        plx
+        pla
+        sta pico_ptr
+        lda #1
+        sta 4,X
+        rts
+
+@load_ok:
+        plx
+        pla
+        sta pico_ptr
+
+        ; Update Cache Tags
+        lda #1
+        sta CACHE_VALID
+        lda #0
+        sta CACHE_DIRTY
+        lda PTR
+        sta CACHE_BLK
+        lda PTR+1
+        sta CACHE_BLK+1
+        lda #0
+        sta 4,X
+        rts
+
+DDISC_FLUSH_CACHE:
+        ; Write CACHE_BLK to Pico using streaming protocol
+        lda pico_ptr
+        pha
+        phx
+
+        lda #CMD_FORTH_WRITE_BLOCK
+        sta CMD_ID
+        lda #2
+        sta ARG_LEN
+        lda CACHE_BLK           ; Block number to write
+        sta ARG_BUFF
+        lda CACHE_BLK+1
+        sta ARG_BUFF+1
+
+        ; Send Command & Block #
+        jsr pico_send_request   ; Waits for Ready Signal (OK,0,0)
+        lda LAST_STATUS
+        bne @flush_err
+
+        ; Stream 1024 bytes from CACHE_BUF
+        lda #<CACHE_BUF
+        sta pico_ptr
+        lda #>CACHE_BUF
+        sta pico_ptr+1
+        
+        ldx #4          ; 4 pages = 1024 bytes
+        ldy #0
+@stream_loop:
+        lda (pico_ptr),y
+        jsr send_byte
+        iny
+        bne @stream_loop
+        inc pico_ptr+1
+        dex
+        bne @stream_loop
+
+        ; Switch to Input to read the final status
+        lda #$00
+        sta VIA_DDRA
+
+        ; Read Final Status (OK/ERR + Len + Len)
+        jsr read_byte
+        sta LAST_STATUS
+        jsr read_byte   ; Len L
+        jsr read_byte   ; Len H
+
+        lda LAST_STATUS
+        pha             ; Save status
+        lda #$FF        ; Restore to Output
+        sta VIA_DDRA
+        pla             ; Restore status
+        bne @flush_err
+
+        ; Success
+        plx
+        pla
+        sta pico_ptr
+        lda #0
+        sta CACHE_DIRTY ; Clean
+        sta 4,X
+        rts
+
+@flush_err:
+        plx
+        pla
+        sta pico_ptr
+        lda #1
+        sta 4,X
+        rts
+
+DDISC_COPY_TO_USER:
+        ; Copy 128 bytes FROM Cache (PTR) TO User (ADDR)
+        lda $00
+        STA ADDR
+        LDA $01
+        STA ADDR+1
+        
+        jsr DDISC_CALC_CACHE_PTR
+        
+        ldy #0
+@copy_loop:
+        lda (PTR),y
+        sta (ADDR),y
+        iny
+        cpy #SSIZE
+        bne @copy_loop
+        rts
+
+DDISC_COPY_FROM_USER:
+        ; Copy 128 bytes FROM User (ADDR) TO Cache (PTR)
+        lda $00
+        STA ADDR
+        LDA $01
+        STA ADDR+1
+        
+        jsr DDISC_CALC_CACHE_PTR
+        
+        ldy #0
+@copy_loop:
+        lda (ADDR),y
+        sta (PTR),y
+        iny
+        cpy #SSIZE
+        bne @copy_loop
+        rts
+
+DDISC_CALC_CACHE_PTR:
+        ; Calculate address in CACHE_BUF based on pico_ptr (0-7)
+        ; Result in PTR
+        lda pico_ptr    ; index 0-7
+        lsr a           ; index / 2
+        clc
+        adc #>CACHE_BUF ; $04 + (index/2)
+        sta PTR+1       ; Source pointer high
+        lda pico_ptr
+        and #1          ; is index odd?
+        beq @even_sector
+        lda #128
+        jmp @set_low
+@even_sector:
+        lda #0
+@set_low:
+        sta PTR         ; Result pointer low
+        rts
 ;
 ;                                       -BCD
 ;                             Convert binary value to BCD
@@ -3288,10 +3668,14 @@ DBCD:     .WORD DOCOL
 ;                                       R/W
 ;                              Read or write one sector
 ;
+;
+;                                       R/W
+;                              Read or write one sector
+;
 L3060:    .BYTE $83,"R/",$D7
-          .WORD L3050    ; link to -BCD
+          .WORD L3050        ; link to -BCD
 RSLW:     .WORD DOCOL
-          .WORD ZEQU,LIT,$C4DA,CSTOR
+          .WORD ZEQU,LIT,RWFLAG,CSTOR
           .WORD SWAP,ZERO,STORE
           .WORD ZERO,OVER,GREAT,OVER
           .WORD LIT,SECTL-1,GREAT,OR,CLIT
@@ -3826,147 +4210,13 @@ L3728:    .WORD $FFD4    ; L3706-L3728
           .WORD DROP
           .WORD SEMIS
 ;
-;                                       R/W
-;                       ( addr block# readflag -- )
-;               The core of the FIG-Forth block storage model.
-;               Implemented per the canonical instruction set.
-;
-L_RW:     .BYTE $83,"R/W",$D7
-          .WORD L3696    ; link to VLIST
-RW:       .WORD *+2
-          ; Per canonical instructions, pop arguments from the stack.
-          ; NOTE: This Forth implementation consistently uses the X register as the
-          ; parameter stack pointer. To maintain compatibility, X is used here.
-
-          ; Pop readflag (1=read, 0=write)
-          lda 0,x
-          sta RW_FLAG
-          inx
-          inx
-
-          ; Pop block#
-          lda 0,x
-          sta RW_BLOCK
-          lda 1,x
-          sta RW_BLOCK+1
-          inx
-          inx
-
-          ; Pop addr
-          lda 0,x
-          sta RW_ADDR
-          lda 1,x
-          sta RW_ADDR+1
-          inx
-          inx
-
- ; Check readflag
- lda RW_FLAG
- bne @read_block
-
-; --- Write Block (readflag = 0) ---
-@write_block:
- ; RW_ADDR currently points to what BLOCK gave us (header_addr+2).
- ; Data starts at header_addr+4, so we must add 2.
-          clc
-          lda RW_ADDR
-          adc #2
-          sta RW_ADDR
-          lda RW_ADDR+1
-          adc #0
-          sta RW_ADDR+1
-
-          ; Set up command frame for CMD_FORTH_WRITE_BLOCK
-          lda #CMD_FORTH_WRITE_BLOCK
-          sta CMD_ID
-          lda #2
-          sta ARG_LEN
-          lda RW_BLOCK
-          sta ARG_BUFF
-          lda RW_BLOCK+1
-          sta ARG_BUFF+1
-
-          ; Manually send header, as we need to stream data afterwards
-          lda #$FF
-          sta VIA_DDRA
-          lda CMD_ID
-          jsr send_byte
-          lda ARG_LEN
-          jsr send_byte
-          lda ARG_BUFF
-          jsr send_byte
-          lda ARG_BUFF+1
-          jsr send_byte
-
-          ; Stream 1024 bytes from RW_ADDR using the mandatory 4x256 page loop
-          lda #4
-          sta RW_PAGE_COUNT
-@write_page_loop:
-          ldy #0
-@write_loop:
-          lda (RW_ADDR),y
-          jsr send_byte
-          iny
-          bne @write_loop
-
-          ; Next page
-          inc RW_ADDR+1
-          dec RW_PAGE_COUNT
-          bne @write_page_loop
-
-          ; Wait for final 3-byte status response from Pico
-          lda #$00
-          sta VIA_DDRA
-          jsr read_byte ; status
-          jsr read_byte ; len_lo
-          jsr read_byte ; len_hi
-          jmp NEXT
-
-; --- Read Block (readflag = 1) ---
-@read_block:
-          ; Use the standard pico_send_request. The Pico will send a standard
-          ; response packet, and the routine will place the 1024-byte payload
-          ; into RESP_BUFF.
-          lda #CMD_FORTH_READ_BLOCK
-          sta CMD_ID
-          lda #2
-          sta ARG_LEN
-          lda RW_BLOCK
-          sta ARG_BUFF
-          lda RW_BLOCK+1
-          sta ARG_BUFF+1
-          jsr pico_send_request
-
-          ; Copy the 1024 bytes from RESP_BUFF to RW_ADDR using the mandatory 4x256 loop.
-          lda #<RESP_BUFF
-          sta RW_SRC_PTR
-          lda #>RESP_BUFF
-          sta RW_SRC_PTR+1
-
-          lda #4
-          sta RW_PAGE_COUNT
-@page_loop:
-          ldy #0
-@byte_loop:
-          lda (RW_SRC_PTR),y
-          sta (RW_ADDR),y
-          iny
-          bne @byte_loop ; inner loop for 256 bytes
-
-          ; increment high bytes of pointers and loop for next page
-          inc RW_SRC_PTR+1
-          inc RW_ADDR+1
-          dec RW_PAGE_COUNT
-          bne @page_loop
-          jmp NEXT
-;
 ;                                       MON
 ;                                       SCREEN 79 LINE 3
 ;
 NTOP:     .BYTE $83,"MO",$CE
-          .WORD L_RW    ; link to (R/W)
+          .WORD L3696    ; link to VLIST
 MON:      .WORD *+2
-          JMP $E000      ; Return to DDos
+          JMP $E000       ; Go to OSI Monitor
 ;
 ; Terminal return and line feed.
 TCR:      PHA
@@ -3977,15 +4227,223 @@ TCR:      PHA
           PLA
           RTS
 ; Local blocking CHRIN
-LCHARIN:    
+INCH:    
         LDA ACIA_DATA	
-        beq LCHARIN	
+        beq INCH	
         sec
         rts
-  
-LECHO:
+; Local Echo  
+OUTCH:
         AND #$7F              ; Standard Ascii
         STA ACIA_DATA
+        RTS 
+
+; ---------------------------------------------------------------------------
+; PICO LIBRARY (Embedded for FIG-Forth Stability)
+; ---------------------------------------------------------------------------
+
+pico_init:
+    ; Initialize Cache
+    lda #0
+    sta CACHE_VALID
+    sta CACHE_DIRTY
+
+    lda #$7F
+    sta VIA_IER
+    lda #$FF
+    sta VIA_DDRA
+    lda #PCR_CA2_LOW
+    sta VIA_PCR
+    lda VIA_PORTA
+    lda VIA_IFR
+    sta VIA_IFR
+    rts
+
+pico_send_request:
+    lda CMD_ID
+    bne @cmd_ok
+    lda #PCR_CA2_LOW
+    sta VIA_PCR
+    lda #$FF
+    sta VIA_DDRA
+    sec
+    rts
+@cmd_ok:
+    lda #$FF
+    sta VIA_DDRA
+    lda CMD_ID
+    jsr send_byte
+    lda #0
+    sta CMD_ID
+    lda ARG_LEN
+    jsr send_byte
+    ldy ARG_LEN
+    beq @skip_args
+    ldx #0
+@arg_loop:
+    lda ARG_BUFF, x
+    jsr send_byte
+    inx
+    dey
+    bne @arg_loop
+@skip_args:
+    lda #$00
+    sta VIA_DDRA
+    jsr read_byte
+    sta LAST_STATUS
+    jsr read_byte
+    sta RESP_LEN
+    jsr read_byte
+    sta RESP_LEN+1
+    lda RESP_LEN+1
+    cmp #4
+    bcc @len_ok
+    bne @len_bad
+    lda RESP_LEN
+    cmp #1
+    bcs @len_bad
+@len_ok:
+    lda RESP_LEN
+    ora RESP_LEN+1
+    beq @done
+    jsr pico_read_bytes
+@done:
+    lda #$FF
+    sta VIA_DDRA
+    clc
+    rts
+@len_bad:
+    lda #$FF
+    sta VIA_DDRA
+    sec
+    rts
+
+send_byte:
+    sta VIA_PORTA
+    lda #PCR_CA2_HIGH
+    sta VIA_PCR
+@wait_ack:
+    lda VIA_IFR
+    and #IFR_CA1_BIT
+    beq @wait_ack
+    lda VIA_PORTA
+    lda VIA_IFR
+    lda #PCR_CA2_LOW
+    sta VIA_PCR
+    lda VIA_PORTA
+    rts
+
+read_byte:
+    lda #PCR_CA2_HIGH
+    sta VIA_PCR
+@wait_data:
+    lda VIA_IFR
+    and #IFR_CA1_BIT
+    beq @wait_data
+    lda VIA_PORTA
+    pha
+    lda VIA_IFR
+    lda #PCR_CA2_LOW
+    sta VIA_PCR
+    lda VIA_PORTA
+    pla
+    rts
+
+pico_read_bytes:
+    lda RESP_LEN
+    sta TEMP_LEN
+    lda RESP_LEN+1
+    sta TEMP_LEN+1
+    lda #<RESP_BUFF
+    sta pico_ptr
+    lda #>RESP_BUFF
+    sta pico_ptr+1
+    ldy #0
+@loop:
+    jsr read_byte
+    sta (pico_ptr), y
+    lda TEMP_LEN
+    bne @dec_low
+    dec TEMP_LEN+1
+@dec_low:
+    dec TEMP_LEN
+    iny
+    bne @no_inc
+    inc pico_ptr+1
+@no_inc:
+    lda TEMP_LEN
+    ora TEMP_LEN+1
+    bne @loop
+    rts
+
+; Helper: Convert BCD in A to Binary in A
+BCD_TO_BIN:
+        PHA
+        AND #$F0
+        LSR A
+        STA pico_ptr    ; High * 8
+        LSR A
+        LSR A
+        CLC
+        ADC pico_ptr    ; High * 2 + High * 8 = High * 10
+        STA pico_ptr
+        PLA
+        AND #$0F
+        CLC
+        ADC pico_ptr
         RTS
-  
-TOP:    .END                  ; end of listing
+
+; ---------------------------------------------------------------------------
+; Initialization Hook (Called once by XCR)
+; ---------------------------------------------------------------------------
+FULL_INIT:
+        JSR pico_init
+        ; Clear Disk Buffers (DAREA to UAREA, size BMAG=1056)
+        LDA #<DAREA
+        STA PTR
+        LDA #>DAREA
+        STA PTR+1
+        LDX #4          ; Clear 4 pages (1024 bytes)
+        LDY #0
+        TYA
+@loop:  STA (PTR),Y
+        INY
+        BNE @loop
+        INC PTR+1
+        DEX
+        BNE @loop
+        ; Clear remaining 32 bytes (1056-1024)
+        LDY #32
+@loop2: DEY
+        STA (PTR),Y
+        CPY #0
+        BNE @loop2
+
+        ; Clear Uninitialized User Area (UAREA+$16 to UAREA+$7F)
+        ; COLD only inits up to offset $15. Variables like R# ($2E) and SCR ($1C)
+        ; are left with garbage (e.g. from BASIC), causing editor crashes.
+        CLC
+        LDA UP
+        ADC #$16
+        STA PTR
+        LDA UP+1
+        ADC #0
+        STA PTR+1
+        LDY #($80 - $16) ; Length to clear
+        LDA #0           ; Clear accumulator
+@loop3: DEY
+        STA (PTR),Y
+        BNE @loop3
+
+        ; FIX: Restore BASE to DECIMAL (10) because ABORT set it before calling CR/FULL_INIT
+        LDY #$10         ; Offset of BASE ($26) relative to PTR (UP+$16)
+        LDA #10
+        STA (PTR),Y
+
+        LDA #1
+        STA INIT_FLAG
+        RTS
+
+INIT_FLAG: .byte 0
+
+TOP:      .END           ; end of listing

@@ -13,7 +13,9 @@
 #include "hardware/rtc.h"
 #include "pico/util/datetime.h"
 #include "w25q64.h"
-
+// NEW FORTH IMPLEMENT START
+#include <stdio.h>   // for snprintf (FORTH)
+// NEW FORTH IMPLEMENT END
 #define CMD_FS_LIST_SIZE 0x29
 
 // --- Wi-Fi Configuration ---
@@ -35,11 +37,32 @@ extern struct lfs_config w25q_cfg;
 lfs_t lfs;
 static bool fs_mounted = false;
 
+// NEW FORTH IMPLEMENT START
+static int ensure_forth_dir(void) {
+    struct lfs_info info;
+    int err = lfs_stat(&lfs, "/FORTH", &info);
+    if (err == 0) {
+        if (info.type == LFS_TYPE_DIR) return 0;
+        // Exists but not a directory
+        return -1;
+    }
+    // Not found: create
+    err = lfs_mkdir(&lfs, "/FORTH");
+    return (err == 0) ? 0 : -1;
+}
+
+static int forth_block_path(char *buf, size_t buf_sz, uint16_t block_num) {
+    // /FORTH/000.FTH
+    int n = snprintf(buf, buf_sz, "/FORTH/%03u.FTH", block_num);
+    return (n < 0 || n >= (int)buf_sz) ? -1 : 0;
+}
+// NEW FORTH IMPLEMENT END
+
 // --- FORTH Virtual Disk File ---
-#define FORTH_DISK_PATH "/forth.raw"
-#define FORTH_DISK_SIZE (256 * 1024) // 256 blocks * 1024 bytes/block
-lfs_file_t forth_disk_file;
-bool forth_disk_open = false;
+//~ #define FORTH_DISK_PATH "/forth.raw"
+//~ #define FORTH_DISK_SIZE (256 * 1024) // 256 blocks * 1024 bytes/block
+//~ lfs_file_t forth_disk_file;
+//~ bool forth_disk_open = false;
 
 // Add near top with other globals (around line 40)
 typedef enum {
@@ -77,6 +100,9 @@ uint16_t savemem_buf_fill = 0;
 // --- HTTP CLIENT HELPERS ---
 #define HTTP_BUF_SIZE 4096
 uint8_t http_buf[HTTP_BUF_SIZE]; // Reduced buffer for chunks
+
+// Buffers for Response (Move to global to avoid 4KB stack overflow)
+uint8_t resp_buf[4096]; 
 
 // File server IP and Port (hardcoded on Pico side)
 #define FILE_SERVER_IP "192.168.100.197"
@@ -522,46 +548,46 @@ void stream_tree_recursive(lfs_t *lfs, const char *path, int depth) {
     lfs_dir_close(lfs, &dir);
 }
 
-void init_forth_disk() {
-    if (!fs_mounted) {
-        printf("FORTH VDISK: FS not mounted, skipping init.\n");
-        return;
-    }
+//~ void init_forth_disk() {
+    //~ if (!fs_mounted) {
+        //~ printf("FORTH VDISK: FS not mounted, skipping init.\n");
+        //~ return;
+    //~ }
 
-    printf("FORTH VDISK: Initializing virtual disk file...\n");
-    int err = lfs_file_open(&lfs, &forth_disk_file, FORTH_DISK_PATH, LFS_O_RDWR | LFS_O_CREAT);
+    //~ printf("FORTH VDISK: Initializing virtual disk file...\n");
+    //~ int err = lfs_file_open(&lfs, &forth_disk_file, FORTH_DISK_PATH, LFS_O_RDWR | LFS_O_CREAT);
 
-    if (err == LFS_ERR_NOENT) {
-        printf("FORTH VDISK: '%s' not found, creating...\n", FORTH_DISK_PATH);
-        err = lfs_file_open(&lfs, &forth_disk_file, FORTH_DISK_PATH, LFS_O_WRONLY | LFS_O_CREAT);
-        if (err) {
-            printf("FORTH VDISK: Failed to create file! Error: %d\n", err);
-            return;
-        }
+    //~ if (err == LFS_ERR_NOENT) {
+        //~ printf("FORTH VDISK: '%s' not found, creating...\n", FORTH_DISK_PATH);
+        //~ err = lfs_file_open(&lfs, &forth_disk_file, FORTH_DISK_PATH, LFS_O_WRONLY | LFS_O_CREAT);
+        //~ if (err) {
+            //~ printf("FORTH VDISK: Failed to create file! Error: %d\n", err);
+            //~ return;
+        //~ }
 
-        // Pre-allocate the file to 256KB by writing zeros
-        char zero_buf[1024] = {0};
-        for (int i = 0; i < 256; i++) {
-            lfs_ssize_t written = lfs_file_write(&lfs, &forth_disk_file, zero_buf, sizeof(zero_buf));
-            if (written < sizeof(zero_buf)) {
-                printf("FORTH VDISK: Failed to pre-allocate file! Error on block %d\n", i);
-                lfs_file_close(&lfs, &forth_disk_file);
-                return;
-            }
-        }
-        lfs_file_close(&lfs, &forth_disk_file);
-        printf("FORTH VDISK: Pre-allocation complete. Re-opening.\n");
-        // Re-open in RDWR mode
-        err = lfs_file_open(&lfs, &forth_disk_file, FORTH_DISK_PATH, LFS_O_RDWR | LFS_O_CREAT);
-    }
+        //~ // Pre-allocate the file to 256KB by writing zeros
+        //~ char zero_buf[1024] = {0};
+        //~ for (int i = 0; i < 256; i++) {
+            //~ lfs_ssize_t written = lfs_file_write(&lfs, &forth_disk_file, zero_buf, sizeof(zero_buf));
+            //~ if (written < sizeof(zero_buf)) {
+                //~ printf("FORTH VDISK: Failed to pre-allocate file! Error on block %d\n", i);
+                //~ lfs_file_close(&lfs, &forth_disk_file);
+                //~ return;
+            //~ }
+        //~ }
+        //~ lfs_file_close(&lfs, &forth_disk_file);
+        //~ printf("FORTH VDISK: Pre-allocation complete. Re-opening.\n");
+        //~ // Re-open in RDWR mode
+        //~ err = lfs_file_open(&lfs, &forth_disk_file, FORTH_DISK_PATH, LFS_O_RDWR | LFS_O_CREAT);
+    //~ }
 
-    if (err == 0) {
-        forth_disk_open = true;
-        printf("FORTH VDISK: '%s' is open and ready.\n", FORTH_DISK_PATH);
-    } else {
-        printf("FORTH VDISK: Failed to open '%s'! Error: %d\n", FORTH_DISK_PATH, err);
-    }
-}
+    //~ if (err == 0) {
+        //~ forth_disk_open = true;
+        //~ printf("FORTH VDISK: '%s' is open and ready.\n", FORTH_DISK_PATH);
+    //~ } else {
+        //~ printf("FORTH VDISK: Failed to open '%s'! Error: %d\n", FORTH_DISK_PATH, err);
+    //~ }
+//~ }
 
 int main() {
     stdio_init_all();
@@ -598,9 +624,6 @@ int main() {
     absolute_time_t timer_start_time;
     bool timer_running = false;
 
-    // Buffers for Response
-    uint8_t resp_buf[4096]; // Increased for larger DIR listings and faster streaming
-
     // --- Auto-mount Filesystem on Boot ---
     int boot_mount_err = lfs_mount(&lfs, &w25q_cfg);
     if (boot_mount_err == 0) {
@@ -618,17 +641,17 @@ int main() {
         }
     }
 
-    // Initialize the Forth virtual disk file
-    init_forth_disk();
+    //~ // Initialize the Forth virtual disk file
+    //~ init_forth_disk();
 
     while (1) {
         cyw43_arch_poll(); // Essential for Wi-Fi background operations
 
-    // --- NEW: Handle streaming state ---
-    if (current_state == STATE_SAVEMEM_STREAM) {
-        uint8_t data = bus_read_byte();
-        resp_buf[savemem_buf_pos++] = data;
-        stream_bytes_remaining--;
+        // --- NEW: Handle streaming state ---
+        if (current_state == STATE_SAVEMEM_STREAM) {
+            uint8_t data = bus_read_byte();
+            resp_buf[savemem_buf_pos++] = data;
+            stream_bytes_remaining--;
 
         // Write to file if buffer is full OR if this is the last data byte
         if (savemem_buf_pos == sizeof(resp_buf) || stream_bytes_remaining == 0) {
@@ -696,29 +719,84 @@ int main() {
         continue;
     }
 
-    if (current_state == STATE_FORTH_WRITE_STREAM) {
-        uint8_t data = bus_read_byte();
-        resp_buf[savemem_buf_pos++] = data;
-        stream_bytes_remaining--;
+    //~ if (current_state == STATE_FORTH_WRITE_STREAM) {
+        //~ uint8_t data = bus_read_byte();
+        //~ resp_buf[savemem_buf_pos++] = data;
+        //~ stream_bytes_remaining--;
 
-        if (stream_bytes_remaining == 0) {
-            printf("FORTH_WRITE: Received 1024 bytes for offset 0x%08lX\n", stream_offset);
+        //~ if (stream_bytes_remaining == 0) {
+            //~ printf("FORTH_WRITE: Received 1024 bytes for offset 0x%08lX\n", stream_offset);
 
-            lfs_file_seek(&lfs, &forth_disk_file, stream_offset, LFS_SEEK_SET);
-            lfs_file_write(&lfs, &forth_disk_file, resp_buf, 1024);
-            lfs_file_sync(&lfs, &forth_disk_file);
+            //~ lfs_file_seek(&lfs, &forth_disk_file, stream_offset, LFS_SEEK_SET);
+            //~ lfs_file_write(&lfs, &forth_disk_file, resp_buf, 1024);
+            //~ lfs_file_sync(&lfs, &forth_disk_file);
 
-            // 5. Send final status
-            bus_write_byte(STATUS_OK);
-            bus_write_byte(0); bus_write_byte(0);
+            //~ // 5. Send final status
+            //~ bus_write_byte(STATUS_OK);
+            //~ bus_write_byte(0); bus_write_byte(0);
 
+            //~ current_state = STATE_IDLE;
+            //~ bus_reset_handshake();
+        //~ }
+        //~ continue;
+    //~ }
+    
+        // NEW FORTH IMPLEMENT START
+        // ================================================================
+        //  STATE_FORTH_WRITE_STREAM
+        //  Receive exactly 1024 bytes and write them to stream_file
+        // ================================================================
+        if (current_state == STATE_FORTH_WRITE_STREAM) {
+        
+            while (stream_bytes_remaining > 0) {
+        
+                // Read next byte from 6502
+                uint8_t b = bus_read_byte();
+                resp_buf[savemem_buf_pos++] = b;
+                stream_bytes_remaining--;
+        
+                // Flush buffer if full OR if this is the final chunk
+                if (savemem_buf_pos == sizeof(resp_buf) ||
+                    stream_bytes_remaining == 0) {
+        
+                    lfs_ssize_t w = lfs_file_write(&lfs, &stream_file,
+                                                    resp_buf, savemem_buf_pos);
+        
+                    if (w != (lfs_ssize_t)savemem_buf_pos) {
+                        // ---------------------------
+                        // Write error — abort cleanly
+                        // ---------------------------
+                        lfs_file_close(&lfs, &stream_file);
+                        stream_file_is_open = false;
+                        current_state = STATE_IDLE;
+        
+                        bus_write_byte(STATUS_ERR);
+                        bus_write_byte(0);
+                        bus_write_byte(0);
+                        bus_reset_handshake();
+                        continue;
+                    }
+        
+                    // Reset buffer index
+                    savemem_buf_pos = 0;
+                }
+            }
+        
+            // ============================================================
+            //  Done — close file and send STATUS_OK
+            // ============================================================
+            lfs_file_close(&lfs, &stream_file);
+            stream_file_is_open = false;
             current_state = STATE_IDLE;
+        
+            bus_write_byte(STATUS_OK);
+            bus_write_byte(0);
+            bus_write_byte(0);
             bus_reset_handshake();
+            continue;
         }
-        continue;
-    }
-    
-    
+
+    // NEW FORTH IMPLEMENT END
     
     
     
@@ -2603,42 +2681,153 @@ int main() {
                 bus_reset_handshake();
                 continue;
             }
-
+            // NEW FORTH IMPLEMENT START  
             case CMD_FORTH_READ_BLOCK:
             {
-                // Args: [BlockNum(2)]
-                if (!forth_disk_open) {
+                if (!fs_mounted) {
                     resp_buf[0] = STATUS_ERR;
                     payload_len = 0;
                     break;
                 }
 
-                uint16_t block_num = arg_buf[0] | (arg_buf[1] << 8);
-                uint32_t offset = block_num * 1024;
-                printf("FORTH_READ: Block %u, Offset 0x%08lX\n", block_num, offset);
-
-                lfs_file_seek(&lfs, &forth_disk_file, offset, LFS_SEEK_SET);
-                lfs_ssize_t read_len = lfs_file_read(&lfs, &forth_disk_file, payload_ptr, 1024);
-
-                resp_buf[0] = (read_len == 1024) ? STATUS_OK : STATUS_ERR;
-                payload_len = (read_len > 0) ? read_len : 0;
+                // Safety: Close any dangling stream file (e.g. from interrupted write)
+                if (stream_file_is_open) {
+                    lfs_file_close(&lfs, &stream_file);
+                    stream_file_is_open = false;
+                }
+            
+                if (ensure_forth_dir() != 0) {
+                    resp_buf[0] = STATUS_ERR;
+                    payload_len = 0;
+                    break;
+                }
+            
+                // Args: [BlockNum(2)]
+                if (arg_len < 2) {
+                    resp_buf[0] = STATUS_ERR;
+                    payload_len = 0;
+                    break;
+                }
+            
+                uint16_t block_num = (uint16_t)arg_buf[0] | ((uint16_t)arg_buf[1] << 8);
+            
+                char path[32];
+                if (forth_block_path(path, sizeof(path), block_num) != 0) {
+                    resp_buf[0] = STATUS_ERR;
+                    payload_len = 0;
+                    break;
+                }
+            
+                int err = lfs_file_open(&lfs, &stream_file, path, LFS_O_RDONLY);
+                if (err < 0) {
+                    if (err == LFS_ERR_NOENT) {
+                        // Create a zero-filled 1K block on first use
+                        err = lfs_file_open(&lfs, &stream_file, path,
+                                            LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+                        if (err < 0) {
+                            resp_buf[0] = STATUS_ERR;
+                            payload_len = 0;
+                            break;
+                        }
+                        memset(resp_buf, 0, 1024); // Use global buffer instead of stack
+                        lfs_file_write(&lfs, &stream_file, resp_buf, 1024);
+                        lfs_file_close(&lfs, &stream_file);
+            
+                        // Reopen for read
+                        err = lfs_file_open(&lfs, &stream_file, path, LFS_O_RDONLY);
+                        if (err < 0) {
+                            resp_buf[0] = STATUS_ERR;
+                            payload_len = 0;
+                            break;
+                        }
+                    } else {
+                        resp_buf[0] = STATUS_ERR;
+                        payload_len = 0;
+                        break;
+                    }
+                }
+            
+                lfs_ssize_t read_len = lfs_file_read(&lfs, &stream_file, payload_ptr, 1024);
+                lfs_file_close(&lfs, &stream_file);
+            
+                if (read_len < 0) {
+                    resp_buf[0] = STATUS_ERR;
+                    payload_len = 0;
+                } else {
+                    if (read_len < 1024) {
+                        memset(payload_ptr + read_len, 0, 1024 - read_len);
+                    }
+                    resp_buf[0] = STATUS_OK;
+                    payload_len = 1024;
+                }
             }
-            break; // Let the standard response sender handle it
+            break;
+            
 
             case CMD_FORTH_WRITE_BLOCK:
             {
-                // Args: [BlockNum(2)] followed by 1024 bytes
-                uint16_t block_num = arg_buf[0] | (arg_buf[1] << 8);
+                if (!fs_mounted) {
+                    resp_buf[0] = STATUS_ERR;
+                    payload_len = 0;
+                    break;
+                }
 
-                // No initial status packet, just get ready to receive
-                stream_offset = block_num * 1024;
+                // Safety: Close any dangling stream file (e.g. from interrupted write)
+                if (stream_file_is_open) {
+                    lfs_file_close(&lfs, &stream_file);
+                    stream_file_is_open = false;
+                }
+            
+                if (ensure_forth_dir() != 0) {
+                    resp_buf[0] = STATUS_ERR;
+                    payload_len = 0;
+                    break;
+                }
+            
+                if (arg_len < 2) {
+                    resp_buf[0] = STATUS_ERR;
+                    payload_len = 0;
+                    break;
+                }
+            
+                uint16_t block_num = (uint16_t)arg_buf[0] | ((uint16_t)arg_buf[1] << 8);
+            
+                char path[32];
+                if (forth_block_path(path, sizeof(path), block_num) != 0) {
+                    resp_buf[0] = STATUS_ERR;
+                    payload_len = 0;
+                    break;
+                }
+            
+                if (stream_file_is_open) {
+                    lfs_file_close(&lfs, &stream_file);
+                    stream_file_is_open = false;
+                }
+            
+                int err = lfs_file_open(&lfs, &stream_file, path,
+                                        LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+                if (err < 0) {
+                    resp_buf[0] = STATUS_ERR;
+                    payload_len = 0;
+                    break;
+                }
+                stream_file_is_open = true;
+            
                 stream_bytes_remaining = 1024;
+                savemem_buf_pos = 0;   // reuse your existing streaming buffer index
                 current_state = STATE_FORTH_WRITE_STREAM;
-                savemem_buf_pos = 0;
-                
-                printf("FORTH_WRITE: Ready for Block %u, Offset 0x%08lX\n", block_num, stream_offset);
-                continue;
+            
+                printf("FORTH_WRITE: Block %u -> %s\n", block_num, path);
+
+                // Send OK header (ready signal) so 6502 knows we are ready for stream
+                bus_write_byte(STATUS_OK);
+                bus_write_byte(0);
+                bus_write_byte(0);
+            
+                bus_reset_handshake();
+                continue;   // jump to top of main loop, into streaming state
             }
+            // NEW FORTH IMPLEMENT END 
 
 
             default:

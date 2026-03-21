@@ -146,6 +146,51 @@ def collect_and_zip_bin_files(output_dir):
     
     return bin_files_copied
 
+def collect_forth_screens(output_dir):
+    """
+    Collect specific Forth screens and zip them into separate archives.
+    """
+    print("\n--- Collecting Forth Screens ---")
+    
+    tasks = [
+        # (Zip Name, Source Directory, List of Filenames)
+        ("figinst_editor.zip", Path("FIGINST_EDITOR"), [f"{i:03d}.FTH" for i in range(87, 98)]),
+        ("one_screen_editor.zip", Path("FIG_ONE_SCREEN_EDITOR"), ["001.FTH"]),
+        ("dots.zip", Path("FIGINST_EDITOR"), ["100.FTH"])
+    ]
+    
+    screens_zipped = 0
+    
+    for zip_name, src_dir, filenames in tasks:
+        # Source directory relative to where script is run (tools/)
+        if not src_dir.exists():
+            print(f"! Directory not found: {src_dir}")
+            continue
+            
+        files_to_zip = []
+        for fname in filenames:
+            fpath = src_dir / fname
+            if fpath.exists():
+                files_to_zip.append(fpath)
+            else:
+                print(f"! Warning: File {fname} not found in {src_dir}")
+        
+        if files_to_zip:
+            zip_path = output_dir / zip_name
+            try:
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for fpath in files_to_zip:
+                        # Store at root of zip
+                        zipf.write(fpath, fpath.name)
+                print(f"✓ Created ZIP: {zip_name} ({len(files_to_zip)} files)")
+                screens_zipped += len(files_to_zip)
+            except Exception as e:
+                print(f"✗ Error creating {zip_name}: {e}")
+        else:
+            print(f"! No files found for {zip_name}")
+            
+    return screens_zipped
+
 def main():
     """Main execution function."""
     print("=" * 50)
@@ -176,6 +221,9 @@ def main():
     print("\n--- Collecting and processing BIN files ---")
     bin_files = collect_and_zip_bin_files(output_dir)
     
+    # Collect Forth screens
+    forth_count = collect_forth_screens(output_dir)
+    
     # Summary
     print("\n" + "=" * 50)
     print("Collection Summary")
@@ -184,6 +232,7 @@ def main():
     print(f"Output directory: {output_dir}")
     print(f"UF2 files collected: {len(uf2_files)}")
     print(f"BIN files processed: {len(bin_files)}")
+    print(f"Forth screens zipped: {forth_count}")
     
     # Show final directory structure
     print("\n--- Final directory contents ---")
@@ -194,7 +243,7 @@ def main():
             else:
                 print(f"  📁 {item.name}/")
     
-    if uf2_files or bin_files:
+    if uf2_files or bin_files or forth_count:
         print(f"\n✓ Build package version_{version} completed successfully!")
         print(f"  Files are in: {output_dir}")
     else:

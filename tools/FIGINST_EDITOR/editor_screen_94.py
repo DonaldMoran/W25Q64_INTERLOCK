@@ -1,0 +1,61 @@
+# tools/make_editor_screen.py
+
+import sys
+
+# SCR # 94
+     
+# ~ source_lines = [
+    # ~ '(  STRING MATCH FOR EDITOR                     PM-WFR-80APR25 )',
+    # ~ ': -TEXT                   ( ADDRESS-3, COUNT-2, ADDRESS-1 --- )',
+    # ~ ' SWAP   -DUP  IF  ( LEAVE BOOLEAN MATCHED-NON-ZERO, NOPE-ZERO )',
+    # ~ '              OVER + SWAP       (NEITHER ADDRESS MAY BE ZERO! )',     << Need correction, space before NEITHER
+    # ~ '        DO  DUP  C@  FORTH  I  C@  -',
+    # ~ '            IF  0=  LEAVE  ELSE  1+  THEN    LOOP',
+    # ~ '        ELSE  DROP  0=  THEN',                                        << Then must be closed !
+    # ~ ': MATCH   ( CURSOR ADDRESS-4, BYTES LEFT-3, STRING ADDRESS-2, )',
+    # ~ '          ( STRING COUNT-1, ---  BOOLEAN-2, CURSOR MOVEMENT-1 )',
+    # ~ '  >R  >R  2DUP  R>  R>  2SWAP  OVER  +  SWAP',
+    # ~ '  ( CADDR-6, BLEFT-5, $ADDR-4, $LEN-3, CADDR+BLEFT-2, CADDR-1 )',
+    # ~ '  DO  2DUP  FORTH   I   -TEXT',
+    # ~ '    IF  >R  2DROP  R>  -  I  SWAP  -  0  SWAP  0  0  LEAVE',
+    # ~ '        (  CADDR BLEFT  $ADDR  $LEN  OR ELSE 0  OFFSET  0  0  )',
+    # ~ '      THEN  LOOP 2DROP   ( CADDR-2, BLEFT-1, OR 0-2, OFFSET-1 )',
+    # ~ '    SWAP  0=  SWAP  ;    -->'
+# ~ ]
+
+source_lines = [
+    '(  STRING MATCH FOR EDITOR                     PM-WFR-80APR25 )',
+    ': -TEXT                   ( ADDRESS-3, COUNT-2, ADDRESS-1 --- )',
+    ' SWAP   -DUP  IF  ( LEAVE BOOLEAN MATCHED-NON-ZERO, NOPE-ZERO )',
+    '              OVER + SWAP      ( NEITHER ADDRESS MAY BE ZERO! )',
+    '        DO  DUP  C@  FORTH  I  C@  -',
+    '            IF  0=  LEAVE  ELSE  1+  THEN    LOOP',
+    '        ELSE  DROP  0=  THEN ;',
+    ': MATCH   ( CURSOR ADDRESS-4, BYTES LEFT-3, STRING ADDRESS-2, )',
+    '          ( STRING COUNT-1, ---  BOOLEAN-2, CURSOR MOVEMENT-1 )',
+    '  >R  >R  2DUP  R>  R>  2SWAP  OVER  +  SWAP',
+    '  ( CADDR-6, BLEFT-5, $ADDR-4, $LEN-3, CADDR+BLEFT-2, CADDR-1 )',
+    '  DO  2DUP  FORTH   I   -TEXT',
+    '    IF  >R  2DROP  R>  -  I  SWAP  -  0  SWAP  0  0  LEAVE',
+    '        (  CADDR BLEFT  $ADDR  $LEN  OR ELSE 0  OFFSET  0  0  )',
+    '      THEN  LOOP 2DROP   ( CADDR-2, BLEFT-1, OR 0-2, OFFSET-1 )',
+    '    SWAP  0=  SWAP  ;    -->'
+]
+
+# Ensure exactly 16 lines
+while len(source_lines) < 16:
+    source_lines.append("")
+
+# Format: 64 chars per line, space padded, NO newlines
+data = bytearray()
+for line in source_lines[:16]:
+    text = line[:64]            # Truncate
+    text = text.ljust(64, ' ')  # Pad with spaces
+    data.extend(text.encode('ascii'))
+
+# Save as 094.FTH
+filename = "094.FTH"
+with open(filename, "wb") as f:
+    f.write(data)
+
+print(f"Created {filename} (1024 bytes). Ready to transfer.")
